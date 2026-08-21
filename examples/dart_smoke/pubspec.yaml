@@ -1,0 +1,10 @@
+name: agw_dart_smoke
+description: Offline Dart FFI smoke test for the amnezia-gateway-sdk C ABI.
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+
+# Intentionally dependency-free so the example runs without `dart pub get`.
+# Production bindings should be generated with ffigen from export/agw.h and
+# use package:ffi for the string helpers.
