@@ -60,21 +60,44 @@ func goString(s *C.char) string {
 	return C.GoString(s)
 }
 
-func clientFrom(h C.agw_client_handle) *clientBox {
+// handleValue resolves a handle the C side handed back. cgo.Handle.Value panics
+// on anything it did not issue, and a panic here would take the host process
+// down instead of returning an error code, so every lookup that a C caller can
+// get wrong - stale handle, already destroyed, plain garbage - resolves to nil
+// instead. Handles come from a counter that never reuses a slot, so a destroyed
+// handle can never resolve to a live object.
+func handleValue(h uintptr) (v any) {
 	if h == 0 {
 		return nil
 	}
-	v := cgo.Handle(h).Value()
-	box, _ := v.(*clientBox)
+	defer func() {
+		if recover() != nil {
+			v = nil
+		}
+	}()
+	return cgo.Handle(h).Value()
+}
+
+// deleteHandle releases a handle, but only if it holds the expected kind, so a
+// mixed-up client/cancel handle is a no-op rather than a silent double free.
+func deleteHandle[T any](h uintptr) {
+	if h == 0 {
+		return
+	}
+	defer func() { _ = recover() }()
+	if _, ok := cgo.Handle(h).Value().(T); !ok {
+		return
+	}
+	cgo.Handle(h).Delete()
+}
+
+func clientFrom(h C.agw_client_handle) *clientBox {
+	box, _ := handleValue(uintptr(h)).(*clientBox)
 	return box
 }
 
 func cancelFrom(h C.agw_cancel_handle) *cancelBox {
-	if h == 0 {
-		return nil
-	}
-	v := cgo.Handle(h).Value()
-	box, _ := v.(*cancelBox)
+	box, _ := handleValue(uintptr(h)).(*cancelBox)
 	return box
 }
 
@@ -132,10 +155,7 @@ func agw_client_create(configJSON *C.char, callbacks *C.agw_callbacks) C.agw_cli
 
 //export agw_client_destroy
 func agw_client_destroy(client C.agw_client_handle) {
-	if client == 0 {
-		return
-	}
-	cgo.Handle(client).Delete()
+	deleteHandle[*clientBox](uintptr(client))
 }
 
 //export agw_post
@@ -216,13 +236,10 @@ func agw_cancel_cancel(cancel C.agw_cancel_handle) {
 
 //export agw_cancel_destroy
 func agw_cancel_destroy(cancel C.agw_cancel_handle) {
-	if cancel == 0 {
-		return
-	}
 	if cb := cancelFrom(cancel); cb != nil {
 		cb.cancel()
 	}
-	cgo.Handle(cancel).Delete()
+	deleteHandle[*cancelBox](uintptr(cancel))
 }
 
 //export agw_export_state
@@ -257,8 +274,19 @@ func agw_string_free(s *C.char) {
 var (
 	cErrorStringsMu sync.Mutex
 	cErrorStrings   = map[int32]*C.char{}
+	// shared reply for codes this library does not define; see agw_error_string
+	unknownErrorCString *C.char
 )
 
+// The returned string is owned by this library and lives for the process: it is
+// interned per code so the caller never frees it. Passing it to agw_string_free
+// would leave the table holding a dangling pointer, which is why agw.h types it
+// as const char *.
+//
+// Only codes this library defines get an entry: an unknown code returns one
+// shared string instead, so a caller sweeping an integer range cannot grow the
+// table without bound.
+//
 //export agw_error_string
 func agw_error_string(code C.int32_t) *C.char {
 	c := int32(code)
@@ -267,12 +295,22 @@ func agw_error_string(code C.int32_t) *C.char {
 	if s, ok := cErrorStrings[c]; ok {
 		return s
 	}
+
 	var text string
-	if c == C.AGW_CANCELLED {
+	switch {
+	case c == C.AGW_CANCELLED:
 		text = "cancelled"
-	} else {
-		text = gateway.ErrorText(gateway.ErrorCode(c))
+	default:
+		known, ok := gateway.LookupErrorText(gateway.ErrorCode(c))
+		if !ok {
+			if unknownErrorCString == nil {
+				unknownErrorCString = C.CString("unknown error")
+			}
+			return unknownErrorCString
+		}
+		text = known
 	}
+
 	s := C.CString(text)
 	cErrorStrings[c] = s
 	return s

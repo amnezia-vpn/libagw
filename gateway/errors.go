@@ -31,6 +31,9 @@ const (
 	ApiCaptchaInvalidError           ErrorCode = 1118
 	ApiCaptchaRefreshError           ErrorCode = 1119
 	ApiRateLimitError                ErrorCode = 1120
+	ApiForbiddenError                ErrorCode = 1121
+	ApiBadGatewayError               ErrorCode = 1122
+	ApiServiceUnavailableError       ErrorCode = 1123
 )
 
 var errorTexts = map[ErrorCode]string{
@@ -56,6 +59,9 @@ var errorTexts = map[ErrorCode]string{
 	ApiCaptchaInvalidError:           "captcha invalid",
 	ApiCaptchaRefreshError:           "captcha refresh required",
 	ApiRateLimitError:                "rate limit exceeded",
+	ApiForbiddenError:                "forbidden",
+	ApiBadGatewayError:               "bad gateway",
+	ApiServiceUnavailableError:       "service unavailable",
 }
 
 // ErrorText returns a short human-readable description of a code.
@@ -64,6 +70,15 @@ func ErrorText(code ErrorCode) string {
 		return s
 	}
 	return fmt.Sprintf("unknown error %d", int(code))
+}
+
+// LookupErrorText reports whether the code is one this package defines. The C
+// ABI needs the distinction: it interns the strings it hands out, and interning
+// a per-code string for codes nobody defined lets a caller grow that table
+// without bound.
+func LookupErrorText(code ErrorCode) (string, bool) {
+	s, ok := errorTexts[code]
+	return s, ok
 }
 
 // Error is the error type returned by Client.Post. Even when Post returns an
