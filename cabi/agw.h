@@ -1,4 +1,4 @@
-/* amnezia-gateway-sdk C ABI.
+/* libagw C ABI.
  *
  * JSON-first contract: configuration, per-request options and persisted
  * state are JSON documents; the only C structs are the small fixed-size

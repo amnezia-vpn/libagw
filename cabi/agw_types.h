@@ -1,4 +1,4 @@
-/* amnezia-gateway-sdk C ABI: type definitions.
+/* libagw C ABI: type definitions.
  *
  * This header is included by the Go cgo layer and must contain types only
  * (no function prototypes) — consumer-facing prototypes live in agw.h.

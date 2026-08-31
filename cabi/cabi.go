@@ -23,7 +23,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/amnezia-vpn/amnezia-gateway-sdk/gateway"
+	"github.com/amnezia-vpn/libagw/gateway"
 )
 
 const abiVersion = 1

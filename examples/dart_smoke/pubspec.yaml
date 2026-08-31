@@ -1,5 +1,5 @@
 name: agw_dart_smoke
-description: Offline Dart FFI smoke test for the amnezia-gateway-sdk C ABI.
+description: Offline Dart FFI smoke test for the libagw C ABI.
 publish_to: none
 
 environment:

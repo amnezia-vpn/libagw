@@ -1,4 +1,4 @@
-# amnezia-gateway-sdk
+# libagw (amnezia-gateway-sdk)
 
 A Qt-free Go port of the amnezia-client `GatewayController`: the reusable
 transport for talking to the Amnezia API gateway — request-envelope crypto,
@@ -120,7 +120,7 @@ depends on whether the host process already contains Go:
   blank-import this package —
 
   ```go
-  import _ "github.com/amnezia-vpn/amnezia-gateway-sdk/cabi"
+  import _ "github.com/amnezia-vpn/libagw/cabi"
   ```
 
   cgo emits the `//export` symbols for an imported package just as it does for

@@ -71,6 +71,12 @@ type PostOptions struct {
 // the body of an ApiCaptchaRequiredError response.
 type Response struct {
 	Body []byte
+	// Status is the outer HTTP status of the answering attempt (0 when no
+	// attempt produced a response). Error mapping already folds the status
+	// into the returned ErrorCode; it is exposed for callers that need to
+	// tell apart gateway conditions the shared codes collapse (e.g. the b2b
+	// SDK's 403/502/503 handling).
+	Status int
 }
 
 // Client talks to the Amnezia API gateway. It is safe for concurrent use.
@@ -150,26 +156,26 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 	c.log(LogDebug, "direct attempt")
 	att := c.attempt(ctx, base, endpoint, env)
 	if ctx.Err() != nil {
-		return Response{Body: att.body}, ctx.Err()
+		return Response{Body: att.body, Status: att.status}, ctx.Err()
 	}
 
 	if !att.ssl && shouldBypassProxy(att.kind, att.body, att.decryptOK) {
 		c.log(LogInfo, "direct response suspicious - running proxy failover")
 		att = c.failover(ctx, endpoint, env, opts, att)
 		if ctx.Err() != nil {
-			return Response{Body: att.body}, ctx.Err()
+			return Response{Body: att.body, Status: att.status}, ctx.Err()
 		}
 	}
 
 	if code := mapResponseError(att.ssl, att.kind, att.status, att.body); code != NoError {
 		c.log(LogWarning, "post finished with error: "+ErrorText(code))
-		return Response{Body: att.body}, codeError(code)
+		return Response{Body: att.body, Status: att.status}, codeError(code)
 	}
 	if !att.decryptOK {
 		c.log(LogError, "response decryption failed")
-		return Response{Body: att.body}, codeError(ApiConfigDecryptionError)
+		return Response{Body: att.body, Status: att.status}, codeError(ApiConfigDecryptionError)
 	}
-	return Response{Body: att.body}, nil
+	return Response{Body: att.body, Status: att.status}, nil
 }
 
 type attemptResult struct {
