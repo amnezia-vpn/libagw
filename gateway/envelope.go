@@ -138,9 +138,14 @@ func aesDecryptCBC(data, key, iv []byte) ([]byte, error) {
 	return pt[:len(pt)-pad], nil
 }
 
-// The hash input is the PEM string bytes, not the DER key.
+// The hash input is the PEM string bytes, not the DER key, so the exact bytes
+// decide the key. The storage objects are encrypted against the form the Qt
+// client hashes: a string literal compiled in from the build environment, with
+// no trailing newline. A PEM read from a file carries one and would derive a
+// different key, leaving every storage object undecryptable and the whole proxy
+// failover path silently dead, so normalise the tail before hashing.
 func deriveProxyListKeyIV(publicKeyPEM []byte) (key, iv []byte) {
-	sum := sha512.Sum512(publicKeyPEM)
+	sum := sha512.Sum512(bytes.TrimRight(publicKeyPEM, "\r\n\t "))
 	h := hex.EncodeToString(sum[:])
 	key, _ = hex.DecodeString(h[0:64])
 	iv, _ = hex.DecodeString(h[64:96])
