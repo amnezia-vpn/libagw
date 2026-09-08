@@ -178,11 +178,12 @@ func TestPostCaptchaNoFailover(t *testing.T) {
 		S3PrimaryEndpoints: []string{storage.URL},
 	})
 	resp, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{})
-	if code := errCodeOf(t, err); code != ApiCaptchaRequiredError {
-		t.Fatalf("code %d, want %d", code, ApiCaptchaRequiredError)
+	// API-level errors are the caller's to interpret: the gateway answered.
+	if err != nil {
+		t.Fatalf("api error body must not become a transport error: %v", err)
 	}
 	var doc map[string]any
-	if json.Unmarshal(resp.Body, &doc) != nil || doc["captcha_id"] != "abc" {
+	if json.Unmarshal(resp.Body, &doc) != nil || doc["http_status"] != float64(402) || doc["captcha_id"] != "abc" {
 		t.Fatalf("captcha body must be passed through, got: %s", resp.Body)
 	}
 	if storageHits.Load() != 0 {
@@ -208,8 +209,8 @@ func TestPostAllPathsBlocked(t *testing.T) {
 	_, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{})
 	// Parity with the Qt client: an undecryptable 200 response maps to a
 	// decryption error, not a download error.
-	if code := errCodeOf(t, err); code != ApiConfigDecryptionError {
-		t.Fatalf("code %d, want %d", code, ApiConfigDecryptionError)
+	if code := errCodeOf(t, err); code != DecryptError {
+		t.Fatalf("code %d, want %d", code, DecryptError)
 	}
 }
 
@@ -303,8 +304,8 @@ func TestImportStateRejectsGarbage(t *testing.T) {
 func TestPostMissingPublicKey(t *testing.T) {
 	c := newTestClient(t, Config{GatewayEndpoint: "https://gw"})
 	_, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{})
-	if code := errCodeOf(t, err); code != ApiMissingAgwPublicKey {
-		t.Fatalf("code %d, want %d", code, ApiMissingAgwPublicKey)
+	if code := errCodeOf(t, err); code != ConfigError {
+		t.Fatalf("code %d, want %d", code, ConfigError)
 	}
 }
 

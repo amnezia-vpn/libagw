@@ -58,7 +58,7 @@ void agw_cancel_destroy(agw_cancel_handle cancel);
 /* Failover caches (working proxy + proxy lists) as an opaque JSON blob. The
  * blob contains censorship-bypass endpoints — persist it in protected
  * storage. Returns NULL on invalid handle; free with agw_string_free.
- * agw_import_state returns AGW_OK or a non-zero code on malformed input. */
+ * agw_import_state returns AGW_OK or AGW_ERR_INVALID_ARGUMENT. */
 char *agw_export_state(agw_client_handle client);
 int32_t agw_import_state(agw_client_handle client, const char *state_json);
 void agw_string_free(char *s);

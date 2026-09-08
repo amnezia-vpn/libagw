@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -56,7 +57,7 @@ func TestEnvelopeUniquePerRequest(t *testing.T) {
 
 func TestBuildEnvelopeRejectsBadKey(t *testing.T) {
 	_, err := buildEnvelope([]byte("{}"), []byte("not a pem"))
-	if err == nil || !isInvalidKeyErr(err) {
+	if !errors.Is(err, errInvalidPublicKey) {
 		t.Fatalf("want errInvalidPublicKey, got %v", err)
 	}
 }

@@ -2,60 +2,28 @@ package gateway
 
 import "fmt"
 
-// ErrorCode mirrors the amnezia-client ErrorCode enum (errorCodes.h) so that
-// applications already built around the 1100-series API codes keep working.
-// Values must never be renumbered.
+// ErrorCode classifies the outcomes in which there is no gateway answer to
+// interpret. Whenever the gateway did answer, Post returns the decrypted body
+// with a nil error regardless of the API status inside it — reading that
+// status is the caller's business. Values are shared with cabi/agw_types.h.
 type ErrorCode int
 
 const (
-	NoError ErrorCode = 0
-
-	ApiConfigDownloadError           ErrorCode = 1100
-	ApiConfigAlreadyAdded            ErrorCode = 1101
-	ApiConfigEmptyError              ErrorCode = 1102
-	ApiConfigTimeoutError            ErrorCode = 1103
-	ApiConfigSslError                ErrorCode = 1104
-	ApiMissingAgwPublicKey           ErrorCode = 1105
-	ApiConfigDecryptionError         ErrorCode = 1106
-	ApiServicesMissingError          ErrorCode = 1107
-	ApiConfigLimitError              ErrorCode = 1108
-	ApiNotFoundError                 ErrorCode = 1109
-	ApiMigrationError                ErrorCode = 1110
-	ApiUpdateRequestError            ErrorCode = 1111
-	ApiSubscriptionExpiredError      ErrorCode = 1112
-	ApiPurchaseError                 ErrorCode = 1113
-	ApiSubscriptionNotActiveError    ErrorCode = 1114
-	ApiNoPurchasedSubscriptionsError ErrorCode = 1115
-	ApiTrialAlreadyUsedError         ErrorCode = 1116
-	ApiCaptchaRequiredError          ErrorCode = 1117
-	ApiCaptchaInvalidError           ErrorCode = 1118
-	ApiCaptchaRefreshError           ErrorCode = 1119
-	ApiRateLimitError                ErrorCode = 1120
+	NoError      ErrorCode = 0
+	ConfigError  ErrorCode = 3
+	TimeoutError ErrorCode = 4
+	SSLError     ErrorCode = 5
+	NetworkError ErrorCode = 6
+	DecryptError ErrorCode = 7
 )
 
 var errorTexts = map[ErrorCode]string{
-	NoError:                          "no error",
-	ApiConfigDownloadError:           "config download error",
-	ApiConfigAlreadyAdded:            "config already added",
-	ApiConfigEmptyError:              "config empty",
-	ApiConfigTimeoutError:            "request timeout",
-	ApiConfigSslError:                "ssl error",
-	ApiMissingAgwPublicKey:           "missing gateway public key",
-	ApiConfigDecryptionError:         "response decryption error",
-	ApiServicesMissingError:          "services missing",
-	ApiConfigLimitError:              "config limit reached",
-	ApiNotFoundError:                 "not found",
-	ApiMigrationError:                "migration error",
-	ApiUpdateRequestError:            "client version update required",
-	ApiSubscriptionExpiredError:      "subscription expired",
-	ApiPurchaseError:                 "purchase error",
-	ApiSubscriptionNotActiveError:    "subscription not active",
-	ApiNoPurchasedSubscriptionsError: "no purchased subscriptions",
-	ApiTrialAlreadyUsedError:         "trial already used",
-	ApiCaptchaRequiredError:          "captcha required",
-	ApiCaptchaInvalidError:           "captcha invalid",
-	ApiCaptchaRefreshError:           "captcha refresh required",
-	ApiRateLimitError:                "rate limit exceeded",
+	NoError:      "no error",
+	ConfigError:  "gateway public key missing or invalid",
+	TimeoutError: "request timed out",
+	SSLError:     "tls error",
+	NetworkError: "gateway unreachable",
+	DecryptError: "response decryption failed",
 }
 
 // ErrorText returns a short human-readable description of a code.
@@ -66,9 +34,7 @@ func ErrorText(code ErrorCode) string {
 	return fmt.Sprintf("unknown error %d", int(code))
 }
 
-// Error is the error type returned by Client.Post. Even when Post returns an
-// Error, the accompanying Response body may be non-empty and meaningful (for
-// example captcha challenges arrive together with ApiCaptchaRequiredError).
+// Error is the error type returned by Client.Post.
 type Error struct {
 	Code ErrorCode
 }

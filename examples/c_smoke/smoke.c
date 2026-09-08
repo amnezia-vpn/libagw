@@ -31,20 +31,20 @@ int main(void)
             NULL);
     assert(client != 0);
 
-    /* Envelope build fails offline with the parity code 1105. */
+    /* Envelope build fails offline: the key is garbage. */
     agw_result r = agw_post(client, "v1/services", "{}", NULL, 0);
-    assert(r.code == 1105);
+    assert(r.code == AGW_ERR_CONFIG);
     agw_result_free(&r);
     assert(r.body == NULL && r.body_len == 0);
 
-    const char *msg = agw_error_string(1105);
+    const char *msg = agw_error_string(AGW_ERR_CONFIG);
     assert(msg != NULL && strlen(msg) > 0);
 
     /* State round-trip. */
     char *state = agw_export_state(client);
     assert(state != NULL && strstr(state, "\"version\":1") != NULL);
     assert(agw_import_state(client, state) == AGW_OK);
-    assert(agw_import_state(client, "junk") != AGW_OK);
+    assert(agw_import_state(client, "junk") == AGW_ERR_INVALID_ARGUMENT);
     agw_string_free(state);
 
     /* Cancel handle lifecycle (single-shot, idempotent cancel). */

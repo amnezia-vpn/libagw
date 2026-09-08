@@ -142,7 +142,7 @@ func agw_client_destroy(client C.agw_client_handle) {
 func agw_post(client C.agw_client_handle, endpoint, payloadJSON, optionsJSON *C.char, cancel C.agw_cancel_handle) C.agw_result {
 	box := clientFrom(client)
 	if box == nil {
-		return makeResult(int32(gateway.ApiConfigDownloadError), nil)
+		return makeResult(C.AGW_ERR_INVALID_ARGUMENT, nil)
 	}
 
 	var opts abiOptions
@@ -175,7 +175,7 @@ func errorCodeOf(err error) int32 {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return C.AGW_CANCELLED
 	}
-	return int32(gateway.ApiConfigDownloadError)
+	return int32(gateway.NetworkError)
 }
 
 func makeResult(code int32, body []byte) C.agw_result {
@@ -238,10 +238,10 @@ func agw_export_state(client C.agw_client_handle) *C.char {
 func agw_import_state(client C.agw_client_handle, stateJSON *C.char) C.int32_t {
 	box := clientFrom(client)
 	if box == nil {
-		return C.int32_t(gateway.ApiConfigDownloadError)
+		return C.AGW_ERR_INVALID_ARGUMENT
 	}
 	if err := box.client.ImportState([]byte(goString(stateJSON))); err != nil {
-		return C.int32_t(gateway.ApiConfigDownloadError)
+		return C.AGW_ERR_INVALID_ARGUMENT
 	}
 	return C.AGW_OK
 }
@@ -268,9 +268,12 @@ func agw_error_string(code C.int32_t) *C.char {
 		return s
 	}
 	var text string
-	if c == C.AGW_CANCELLED {
+	switch c {
+	case C.AGW_CANCELLED:
 		text = "cancelled"
-	} else {
+	case C.AGW_ERR_INVALID_ARGUMENT:
+		text = "invalid argument"
+	default:
 		text = gateway.ErrorText(gateway.ErrorCode(c))
 	}
 	s := C.CString(text)

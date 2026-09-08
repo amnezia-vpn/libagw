@@ -40,16 +40,16 @@ int main()
                        &callbacks);
     assert(client.valid());
 
-    // Offline: envelope build fails with the client-parity code 1105.
+    // Offline: envelope build fails because the key is garbage.
     agw::Client::Result r = client.post("v1/services", "{}");
     assert(!r.ok());
-    assert(r.code == 1105);
+    assert(r.code == AGW_ERR_CONFIG);
     assert(std::string(r.message()).find("public key") != std::string::npos);
     assert(g_logLines > 0 && "log callback must have fired");
 
     // Options JSON is accepted and a malformed one degrades gracefully.
-    assert(client.post("v1/services", "{}", R"({"service_type":"svc","user_country_code":"ru"})").code == 1105);
-    assert(client.post("v1/services", "{}", "not json").code == 1105);
+    assert(client.post("v1/services", "{}", R"({"service_type":"svc","user_country_code":"ru"})").code == AGW_ERR_CONFIG);
+    assert(client.post("v1/services", "{}", "not json").code == AGW_ERR_CONFIG);
 
     // Cancellation plumbing.
     agw::CancelToken cancel;

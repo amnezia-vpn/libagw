@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 )
 
@@ -48,8 +47,4 @@ func (c *Client) ImportState(data []byte) error {
 		c.proxyLists[k] = append([]string(nil), v...)
 	}
 	return nil
-}
-
-func isInvalidKeyErr(err error) bool {
-	return errors.Is(err, errInvalidPublicKey)
 }

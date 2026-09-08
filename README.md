@@ -47,11 +47,16 @@ and cancel via `ctx`.
 ## Parity with amnezia-client
 
 The wire protocol and failover behaviour are ported faithfully from
-`gatewayController.cpp` and `apiUtils::checkNetworkReplyErrors`, including the
-quirks the gateway relies on: a 32-byte AES IV of which CBC uses the first 16,
+`gatewayController.cpp`, including the quirks the gateway relies on: a 32-byte AES IV of which CBC uses the first 16,
 an 8-byte salt that is generated and transmitted but unused, RSA PKCS#1 v1.5,
-and the SHA-512(PEM) proxy-list key schedule. Error codes match the client's
-1100-series `ErrorCode` enum.
+and the SHA-512(PEM) proxy-list key schedule.
+
+The library stops at the transport: `Post` returns the decrypted body for any
+gateway answer, including API errors (`http_status`/`message` in the body), and
+an `ErrorCode` only when there is no answer to interpret — public key missing
+or invalid, timeout, TLS error, gateway unreachable, undecryptable answer.
+Mapping the body onto application errors (what `apiUtils::checkNetworkReplyErrors`
+does in amnezia-client) stays with each application.
 
 Two deliberate improvements over the Qt client:
 

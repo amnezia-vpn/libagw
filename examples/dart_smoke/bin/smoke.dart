@@ -169,15 +169,15 @@ void main(List<String> args) {
   _free(config);
   expect(client != 0, 'client created');
 
-  // Offline: envelope build fails with the client-parity code 1105.
+  // Offline: envelope build fails because the key is garbage (AGW_ERR_CONFIG).
   final r = agw.postJson(client, 'v1/services', '{}');
-  expect(r.code == 1105, 'missing public key maps to 1105, got ${r.code}');
-  expect(fromCString(agw.errorString(1105)).isNotEmpty, 'error string is non-empty');
+  expect(r.code == 3, 'garbage public key maps to AGW_ERR_CONFIG, got ${r.code}');
+  expect(fromCString(agw.errorString(3)).isNotEmpty, 'error string is non-empty');
 
   // Options are accepted.
   final withOptions = agw.postJson(client, 'v1/services', '{}',
       options: jsonEncode({'service_type': 'svc', 'user_country_code': 'ru'}));
-  expect(withOptions.code == 1105, 'options accepted');
+  expect(withOptions.code == 3, 'options accepted');
 
   // A pre-cancelled token short-circuits the call.
   final cancel = agw.cancelCreate();
