@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"runtime/cgo"
-	"sync"
 	"time"
 	"unsafe"
 
@@ -60,21 +59,43 @@ func goString(s *C.char) string {
 	return C.GoString(s)
 }
 
-func clientFrom(h C.agw_client_handle) *clientBox {
+// cgo.Handle.Value and Delete panic on a handle the runtime did not issue or
+// has already released, and a panic in an exported function takes the host
+// process down. Every lookup a C caller can get wrong — stale, destroyed,
+// garbage — resolves to nil instead; handles come from a monotonic counter, so
+// a destroyed one never resolves to a live object.
+func handleValue(h uintptr) (v any) {
 	if h == 0 {
 		return nil
 	}
-	v := cgo.Handle(h).Value()
-	box, _ := v.(*clientBox)
+	defer func() {
+		if recover() != nil {
+			v = nil
+		}
+	}()
+	return cgo.Handle(h).Value()
+}
+
+// deleteHandle releases a handle only if it holds the expected kind, so a
+// client handle passed to agw_cancel_destroy (or vice versa) is a no-op.
+func deleteHandle[T any](h uintptr) {
+	if h == 0 {
+		return
+	}
+	defer func() { _ = recover() }()
+	if _, ok := cgo.Handle(h).Value().(T); !ok {
+		return
+	}
+	cgo.Handle(h).Delete()
+}
+
+func clientFrom(h C.agw_client_handle) *clientBox {
+	box, _ := handleValue(uintptr(h)).(*clientBox)
 	return box
 }
 
 func cancelFrom(h C.agw_cancel_handle) *cancelBox {
-	if h == 0 {
-		return nil
-	}
-	v := cgo.Handle(h).Value()
-	box, _ := v.(*cancelBox)
+	box, _ := handleValue(uintptr(h)).(*cancelBox)
 	return box
 }
 
@@ -132,10 +153,7 @@ func agw_client_create(configJSON *C.char, callbacks *C.agw_callbacks) C.agw_cli
 
 //export agw_client_destroy
 func agw_client_destroy(client C.agw_client_handle) {
-	if client == 0 {
-		return
-	}
-	cgo.Handle(client).Delete()
+	deleteHandle[*clientBox](uintptr(client))
 }
 
 //export agw_post
@@ -216,13 +234,10 @@ func agw_cancel_cancel(cancel C.agw_cancel_handle) {
 
 //export agw_cancel_destroy
 func agw_cancel_destroy(cancel C.agw_cancel_handle) {
-	if cancel == 0 {
-		return
-	}
 	if cb := cancelFrom(cancel); cb != nil {
 		cb.cancel()
 	}
-	cgo.Handle(cancel).Delete()
+	deleteHandle[*cancelBox](uintptr(cancel))
 }
 
 //export agw_export_state
@@ -253,30 +268,27 @@ func agw_string_free(s *C.char) {
 	}
 }
 
-// Never freed: agw_error_string promises static-lifetime strings.
+// Allocated once for the fixed code set and never freed: agw_error_string
+// promises static-lifetime strings. Codes outside the set share one string, so
+// a caller sweeping an integer range cannot grow anything.
 var (
-	cErrorStringsMu sync.Mutex
-	cErrorStrings   = map[int32]*C.char{}
+	cErrorStrings = map[int32]*C.char{
+		C.AGW_OK:                   C.CString(gateway.ErrorText(gateway.NoError)),
+		C.AGW_CANCELLED:            C.CString("cancelled"),
+		C.AGW_ERR_INVALID_ARGUMENT: C.CString("invalid argument"),
+		C.AGW_ERR_CONFIG:           C.CString(gateway.ErrorText(gateway.ConfigError)),
+		C.AGW_ERR_TIMEOUT:          C.CString(gateway.ErrorText(gateway.TimeoutError)),
+		C.AGW_ERR_SSL:              C.CString(gateway.ErrorText(gateway.SSLError)),
+		C.AGW_ERR_NETWORK:          C.CString(gateway.ErrorText(gateway.NetworkError)),
+		C.AGW_ERR_DECRYPT:          C.CString(gateway.ErrorText(gateway.DecryptError)),
+	}
+	cUnknownErrorString = C.CString("unknown error")
 )
 
 //export agw_error_string
 func agw_error_string(code C.int32_t) *C.char {
-	c := int32(code)
-	cErrorStringsMu.Lock()
-	defer cErrorStringsMu.Unlock()
-	if s, ok := cErrorStrings[c]; ok {
+	if s, ok := cErrorStrings[int32(code)]; ok {
 		return s
 	}
-	var text string
-	switch c {
-	case C.AGW_CANCELLED:
-		text = "cancelled"
-	case C.AGW_ERR_INVALID_ARGUMENT:
-		text = "invalid argument"
-	default:
-		text = gateway.ErrorText(gateway.ErrorCode(c))
-	}
-	s := C.CString(text)
-	cErrorStrings[c] = s
-	return s
+	return cUnknownErrorString
 }
