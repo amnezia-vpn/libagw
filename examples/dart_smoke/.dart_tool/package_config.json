@@ -1,0 +1,16 @@
+{
+  "configVersion": 2,
+  "packages": [
+    {
+      "name": "agw_dart_smoke",
+      "rootUri": "../",
+      "packageUri": "lib/",
+      "languageVersion": "3.5"
+    }
+  ],
+  "generator": "pub",
+  "generatorVersion": "3.10.8",
+  "flutterRoot": "file:///Users/nethius/flutter",
+  "flutterVersion": "3.38.9",
+  "pubCache": "file:///Users/nethius/.pub-cache"
+}

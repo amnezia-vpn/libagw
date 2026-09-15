@@ -37,6 +37,9 @@ uint32_t agw_abi_version(void);
  * }
  * callbacks may be NULL. Returns 0 on invalid input. */
 agw_client_handle agw_client_create(const char *config_json, const agw_callbacks *callbacks);
+/* Destroying a handle twice, or passing a handle of the other kind, is a no-op;
+ * calls that take a destroyed handle return an error instead of crashing the
+ * process. */
 void agw_client_destroy(agw_client_handle client);
 
 /* Posts one request. endpoint is a path relative to the gateway base
@@ -58,12 +61,13 @@ void agw_cancel_destroy(agw_cancel_handle cancel);
 /* Failover caches (working proxy + proxy lists) as an opaque JSON blob. The
  * blob contains censorship-bypass endpoints — persist it in protected
  * storage. Returns NULL on invalid handle; free with agw_string_free.
- * agw_import_state returns AGW_OK or a non-zero code on malformed input. */
+ * agw_import_state returns AGW_OK or AGW_ERR_INVALID_ARGUMENT. */
 char *agw_export_state(agw_client_handle client);
 int32_t agw_import_state(agw_client_handle client, const char *state_json);
 void agw_string_free(char *s);
 
-/* Static description of a result code; never freed by the caller. */
+/* Static description of a result code; never freed by the caller. Codes this
+ * library does not define all share one "unknown error" string. */
 const char *agw_error_string(int32_t code);
 
 #ifdef __cplusplus

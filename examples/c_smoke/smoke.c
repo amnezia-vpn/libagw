@@ -31,20 +31,20 @@ int main(void)
             NULL);
     assert(client != 0);
 
-    /* Envelope build fails offline with the parity code 1105. */
+    /* Envelope build fails offline: the key is garbage. */
     agw_result r = agw_post(client, "v1/services", "{}", NULL, 0);
-    assert(r.code == 1105);
+    assert(r.code == AGW_ERR_CONFIG);
     agw_result_free(&r);
     assert(r.body == NULL && r.body_len == 0);
 
-    const char *msg = agw_error_string(1105);
+    const char *msg = agw_error_string(AGW_ERR_CONFIG);
     assert(msg != NULL && strlen(msg) > 0);
 
     /* State round-trip. */
     char *state = agw_export_state(client);
     assert(state != NULL && strstr(state, "\"version\":1") != NULL);
     assert(agw_import_state(client, state) == AGW_OK);
-    assert(agw_import_state(client, "junk") != AGW_OK);
+    assert(agw_import_state(client, "junk") == AGW_ERR_INVALID_ARGUMENT);
     agw_string_free(state);
 
     /* Cancel handle lifecycle (single-shot, idempotent cancel). */
@@ -54,7 +54,27 @@ int main(void)
     agw_cancel_cancel(cancel);
     agw_cancel_destroy(cancel);
 
+    /* Misused handles never crash the process: a destroyed or garbage handle
+     * is an error result or a no-op, a mixed-up kind is ignored. */
+    agw_cancel_destroy(cancel);              /* double destroy */
+    agw_client_destroy(cancel);              /* wrong kind: must not touch the client */
+    r = agw_post(client, "v1/services", "{}", NULL, cancel); /* destroyed cancel handle is ignored */
+    assert(r.code == AGW_ERR_CONFIG);
+    agw_result_free(&r);
     agw_client_destroy(client);
+    agw_client_destroy(client);              /* double destroy */
+    r = agw_post(client, "v1/services", "{}", NULL, 0);
+    assert(r.code == AGW_ERR_INVALID_ARGUMENT);
+    agw_result_free(&r);
+    r = agw_post((agw_client_handle)0xdeadbeef, "v1/services", "{}", NULL, 0);
+    assert(r.code == AGW_ERR_INVALID_ARGUMENT);
+    agw_result_free(&r);
+    assert(agw_export_state(client) == NULL);
+    assert(agw_import_state(client, "{}") == AGW_ERR_INVALID_ARGUMENT);
+
+    /* Unknown codes share one static string; the table never grows. */
+    assert(agw_error_string(424242) == agw_error_string(-1));
+    assert(strlen(agw_error_string(424242)) > 0);
 
     printf("smoke ok\n");
     return 0;

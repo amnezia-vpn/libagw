@@ -1,0 +1,14 @@
+{
+  "roots": [
+    "agw_dart_smoke"
+  ],
+  "packages": [
+    {
+      "name": "agw_dart_smoke",
+      "version": "0.0.0",
+      "dependencies": [],
+      "devDependencies": []
+    }
+  ],
+  "configVersion": 1
+}
