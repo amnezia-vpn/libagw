@@ -15,7 +15,7 @@
 
 int main(void)
 {
-    assert(agw_abi_version() == 1);
+    assert(agw_abi_version() == 2);
 
     /* Invalid configs are rejected. */
     assert(agw_client_create(NULL, NULL) == 0);
@@ -34,6 +34,7 @@ int main(void)
     /* Envelope build fails offline: the key is garbage. */
     agw_result r = agw_post(client, "v1/services", "{}", NULL, 0);
     assert(r.code == AGW_ERR_CONFIG);
+    assert(r.http_status == 0); /* no answer: nothing was sent */
     agw_result_free(&r);
     assert(r.body == NULL && r.body_len == 0);
 

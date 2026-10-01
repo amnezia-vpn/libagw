@@ -37,6 +37,7 @@ func ErrorText(code ErrorCode) string {
 // Error is the error type returned by Client.Post.
 type Error struct {
 	Code ErrorCode
+	HTTPStatus int
 }
 
 func (e *Error) Error() string {

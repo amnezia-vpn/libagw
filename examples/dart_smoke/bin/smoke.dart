@@ -25,6 +25,8 @@ final class AgwResult extends Struct {
   external Pointer<Uint8> body;
   @Size()
   external int bodyLen;
+  @Int32()
+  external int httpStatus;
 }
 
 typedef AgwLogNative = Void Function(Int32 level, Pointer<Uint8> message, Pointer<Void> userData);
@@ -153,7 +155,7 @@ void main(List<String> args) {
   }
 
   final agw = Agw(DynamicLibrary.open(args.first));
-  expect(agw.abiVersion() == 1, 'abi version is 1');
+  expect(agw.abiVersion() == 2, 'abi version is 2');
 
   // Invalid configs are rejected (handle 0).
   final badConfig = toCString('{}');

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha512"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -133,6 +134,9 @@ func aesDecryptCBC(data, key, iv []byte) ([]byte, error) {
 	cipher.NewCBCDecrypter(blk, iv[:aesBlock]).CryptBlocks(pt, data)
 	pad := int(pt[len(pt)-1])
 	if pad <= 0 || pad > aesBlock || pad > len(pt) {
+		return nil, errors.New("bad padding")
+	}
+	if subtle.ConstantTimeCompare(pt[len(pt)-pad:], bytes.Repeat([]byte{byte(pad)}, pad)) != 1 {
 		return nil, errors.New("bad padding")
 	}
 	return pt[:len(pt)-pad], nil

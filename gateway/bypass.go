@@ -35,7 +35,7 @@ func apiStatus(body []byte) (status int, message string) {
 	return status, message
 }
 
-func shouldBypassProxy(kind transportErrorKind, body []byte, decryptOK bool) bool {
+func shouldBypassProxy(kind transportErrorKind, httpStatus int, body []byte, decryptOK bool) bool {
 	if !decryptOK {
 		return true
 	}
@@ -67,5 +67,5 @@ func shouldBypassProxy(kind transportErrorKind, body []byte, decryptOK bool) boo
 	case 422:
 		return message != unprocessableSubscriptionMessage
 	}
-	return kind != transportOK
+	return kind != transportOK || httpStatus >= 400
 }

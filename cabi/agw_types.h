@@ -51,11 +51,15 @@ typedef struct {
 } agw_callbacks;
 
 /* One request result. body is set only when code is AGW_OK; it is
- * NUL-terminated (body_len excludes the NUL). Free with agw_result_free. */
+ * NUL-terminated (body_len excludes the NUL). Free with agw_result_free.
+ * http_status is the HTTP status of the last answer, 0 when there was none;
+ * it is set on errors too, so an undecryptable HTTP 501 or a CDN 502 page is
+ * told apart from a garbled 200 (added in ABI version 2). */
 typedef struct {
     int32_t code;
     char *body;
     size_t body_len;
+    int32_t http_status;
 } agw_result;
 
 #ifdef __cplusplus
