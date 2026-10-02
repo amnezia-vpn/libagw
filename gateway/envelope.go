@@ -140,7 +140,7 @@ func aesDecryptCBC(data, key, iv []byte) ([]byte, error) {
 
 // The hash input is the PEM string bytes, not the DER key.
 func deriveProxyListKeyIV(publicKeyPEM []byte) (key, iv []byte) {
-	sum := sha512.Sum512(bytes.TrimRight(publicKeyPEM, "\r\n\t "))
+	sum := sha512.Sum512(publicKeyPEM)
 	h := hex.EncodeToString(sum[:])
 	key, _ = hex.DecodeString(h[0:64])
 	iv, _ = hex.DecodeString(h[64:96])
