@@ -11,12 +11,9 @@ import (
 	"testing"
 )
 
-// A saved proxy that fails TLS must not stick: the request goes through
-// failover, which replaces the proxy.
 func TestPostSavedProxyTLSErrorRunsFailover(t *testing.T) {
 	priv, pubPEM := newTestKeyPair(t)
 
-	// Self-signed certificate the default client does not trust.
 	var badHits atomic.Int32
 	badProxy := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		badHits.Add(1)
@@ -57,8 +54,6 @@ func TestPostSavedProxyTLSErrorRunsFailover(t *testing.T) {
 	}
 }
 
-// When failover finds nothing, the TLS-broken proxy is still dropped, so the
-// next request tries the gateway directly instead of failing the same way.
 func TestPostSavedProxyTLSErrorDropsProxy(t *testing.T) {
 	_, pubPEM := newTestKeyPair(t)
 	badProxy := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -79,8 +74,6 @@ func TestPostSavedProxyTLSErrorDropsProxy(t *testing.T) {
 	}
 }
 
-// A TLS error on the direct gateway path still ends the request without
-// failover, as in the Qt client.
 func TestPostDirectTLSErrorNoFailover(t *testing.T) {
 	_, pubPEM := newTestKeyPair(t)
 	gw := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -103,8 +96,6 @@ func TestPostDirectTLSErrorNoFailover(t *testing.T) {
 	}
 }
 
-// The proxy picked by the health check is not tried a second time in the
-// sweep.
 func TestPickedProxyNotRetriedInSweep(t *testing.T) {
 	_, pubPEM := newTestKeyPair(t)
 	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -133,7 +124,6 @@ func TestPickedProxyNotRetriedInSweep(t *testing.T) {
 	}
 }
 
-// A request through the saved proxy is logged as such, not as a direct attempt.
 func TestLogTellsSavedProxyFromDirect(t *testing.T) {
 	priv, pubPEM := newTestKeyPair(t)
 	proxy, _ := proxyServer(t, priv, func([]byte) []byte { return []byte(`{}`) })
