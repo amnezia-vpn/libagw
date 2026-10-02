@@ -21,8 +21,7 @@
 extern "C" {
 #endif
 
-/* ABI version of this header/library pair. A host checks it against the
- * version its header was written for: 2 added agw_result.http_status. */
+/* ABI version of this header/library pair. */
 uint32_t agw_abi_version(void);
 
 /* Creates a client from a JSON config:

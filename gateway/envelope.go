@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha512"
-	"crypto/subtle"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -136,15 +135,12 @@ func aesDecryptCBC(data, key, iv []byte) ([]byte, error) {
 	if pad <= 0 || pad > aesBlock || pad > len(pt) {
 		return nil, errors.New("bad padding")
 	}
-	if subtle.ConstantTimeCompare(pt[len(pt)-pad:], bytes.Repeat([]byte{byte(pad)}, pad)) != 1 {
-		return nil, errors.New("bad padding")
-	}
 	return pt[:len(pt)-pad], nil
 }
 
 // The hash input is the PEM string bytes, not the DER key.
 func deriveProxyListKeyIV(publicKeyPEM []byte) (key, iv []byte) {
-	sum := sha512.Sum512(publicKeyPEM)
+	sum := sha512.Sum512(bytes.TrimRight(publicKeyPEM, "\r\n\t "))
 	h := hex.EncodeToString(sum[:])
 	key, _ = hex.DecodeString(h[0:64])
 	iv, _ = hex.DecodeString(h[64:96])

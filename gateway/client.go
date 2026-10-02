@@ -71,7 +71,6 @@ type PostOptions struct {
 // errors; Post never interprets them.
 type Response struct {
 	Body []byte
-	HTTPStatus int
 }
 
 // Client talks to the Amnezia API gateway. It is safe for concurrent use.
@@ -144,7 +143,11 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 	if !viaProxy {
 		base = c.cfg.GatewayEndpoint
 	}
-	c.log(LogDebug, "direct attempt")
+	if viaProxy {
+		c.log(LogDebug, "saved proxy attempt")
+	} else {
+		c.log(LogDebug, "direct attempt")
+	}
 	att := c.attempt(ctx, base, endpoint, env)
 	if ctx.Err() != nil {
 		return Response{}, ctx.Err()
@@ -154,7 +157,7 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 	case att.ssl && viaProxy:
 		c.log(LogInfo, "saved proxy tls error - running proxy failover")
 		att = c.failover(ctx, endpoint, env, opts, att)
-	case !att.ssl && shouldBypassProxy(att.kind, att.status, att.body, att.decryptOK):
+	case !att.ssl && shouldBypassProxy(att.kind, att.body, att.decryptOK):
 		c.log(LogInfo, "direct response suspicious - running proxy failover")
 		att = c.failover(ctx, endpoint, env, opts, att)
 	}
@@ -164,9 +167,9 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 
 	if code := transportErrorCode(att); code != NoError {
 		c.log(LogWarning, "post finished with error: "+ErrorText(code))
-		return Response{}, &Error{Code: code, HTTPStatus: att.status}
+		return Response{}, codeError(code)
 	}
-	return Response{Body: att.body, HTTPStatus: att.status}, nil
+	return Response{Body: att.body}, nil
 }
 
 func transportErrorCode(a attemptResult) ErrorCode {
@@ -186,14 +189,13 @@ func transportErrorCode(a attemptResult) ErrorCode {
 type attemptResult struct {
 	kind      transportErrorKind
 	ssl       bool
-	status    int    // HTTP status, 0 when there was no answer
 	body      []byte // decrypted when decryptOK, raw otherwise
 	decryptOK bool
 }
 
 func (c *Client) attempt(ctx context.Context, base, endpoint string, env envelope) attemptResult {
 	sr := c.send(ctx, http.MethodPost, joinURL(base, endpoint), env.body, c.cfg.RequestTimeout, newRequestID())
-	out := attemptResult{kind: sr.kind, ssl: sr.ssl, status: sr.status, body: sr.body}
+	out := attemptResult{kind: sr.kind, ssl: sr.ssl, body: sr.body}
 	if dec, err := aesDecryptCBC(sr.body, env.key, env.iv); err == nil {
 		out.body = dec
 		out.decryptOK = true
@@ -202,7 +204,7 @@ func (c *Client) attempt(ctx context.Context, base, endpoint string, env envelop
 }
 
 func (c *Client) attemptAccepted(a attemptResult) bool {
-	return !a.ssl && !shouldBypassProxy(a.kind, a.status, a.body, a.decryptOK)
+	return !a.ssl && !shouldBypassProxy(a.kind, a.body, a.decryptOK)
 }
 
 func (c *Client) failover(ctx context.Context, endpoint string, env envelope, opts PostOptions, last attemptResult) attemptResult {
@@ -212,11 +214,13 @@ func (c *Client) failover(ctx context.Context, endpoint string, env envelope, op
 	// The proxy used for the direct attempt (if any) just failed: drop it.
 	c.setWorkingProxy("")
 
-	if picked := c.pickHealthyProxy(ctx, proxies); picked != "" {
+	picked := c.pickHealthyProxy(ctx, proxies)
+	if picked != "" {
 		c.log(LogDebug, "healthy proxy found")
 		att := c.attempt(ctx, picked, endpoint, env)
 		if c.attemptAccepted(att) {
 			c.setWorkingProxy(picked)
+			c.log(LogInfo, "healthy proxy answered")
 			return att
 		}
 		last = att
@@ -225,6 +229,9 @@ func (c *Client) failover(ctx context.Context, endpoint string, env envelope, op
 	for i, proxy := range proxies {
 		if ctx.Err() != nil {
 			return last
+		}
+		if proxy == picked {
+			continue
 		}
 		att := c.attempt(ctx, proxy, endpoint, env)
 		last = att

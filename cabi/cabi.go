@@ -25,8 +25,7 @@ import (
 	"github.com/amnezia-vpn/libagw/gateway"
 )
 
-// 2: agw_result gained http_status.
-const abiVersion = 2
+const abiVersion = 1
 
 type clientBox struct {
 	client *gateway.Client
@@ -180,27 +179,21 @@ func agw_post(client C.agw_client_handle, endpoint, payloadJSON, optionsJSON *C.
 		ServiceType:     opts.ServiceType,
 		UserCountryCode: opts.UserCountryCode,
 	})
-	code, status := errorCodeOf(err)
-	if err == nil {
-		status = resp.HTTPStatus
-	}
-	r := makeResult(code, resp.Body)
-	r.http_status = C.int32_t(status)
-	return r
+	return makeResult(errorCodeOf(err), resp.Body)
 }
 
-func errorCodeOf(err error) (code int32, httpStatus int) {
+func errorCodeOf(err error) int32 {
 	if err == nil {
-		return int32(gateway.NoError), 0
+		return int32(gateway.NoError)
 	}
 	var gwErr *gateway.Error
 	if errors.As(err, &gwErr) {
-		return int32(gwErr.Code), gwErr.HTTPStatus
+		return int32(gwErr.Code)
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return C.AGW_CANCELLED, 0
+		return C.AGW_CANCELLED
 	}
-	return int32(gateway.NetworkError), 0
+	return int32(gateway.NetworkError)
 }
 
 func makeResult(code int32, body []byte) C.agw_result {

@@ -35,7 +35,6 @@ public:
     {
         int code = 0;
         std::string body;
-        int httpStatus = 0; // 0 when there was no answer
 
         bool ok() const { return code == AGW_OK; }
         const char *message() const { return agw_error_string(code); }
@@ -80,7 +79,6 @@ public:
                                 cancel != nullptr ? cancel->handle() : 0);
         Result out;
         out.code = r.code;
-        out.httpStatus = r.http_status;
         if (r.body != nullptr) {
             out.body.assign(r.body, r.body_len);
         }

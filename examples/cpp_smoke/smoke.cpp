@@ -24,7 +24,7 @@ void onLog(int level, const char *message, void *user_data)
 
 int main()
 {
-    assert(agw_abi_version() == 2);
+    assert(agw_abi_version() == 1);
 
     agw_callbacks callbacks{};
     callbacks.struct_size = sizeof(agw_callbacks);

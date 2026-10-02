@@ -56,11 +56,7 @@ gateway answer, including API errors (`http_status`/`message` in the body), and
 an `ErrorCode` only when there is no answer to interpret — public key missing
 or invalid, timeout, TLS error, gateway unreachable, undecryptable answer.
 Mapping the body onto application errors (what `apiUtils::checkNetworkReplyErrors`
-does in amnezia-client) stays with each application. For that the result also
-carries the HTTP status of the last answer (`Response.HTTPStatus`,
-`Error.HTTPStatus`, `agw_result.http_status` since ABI version 2), set on
-errors too: an undecryptable HTTP 501 means "update the application", a 502
-page from a CDN is a download error rather than a decryption error.
+does in amnezia-client) stays with each application.
 
 Two deliberate improvements over the Qt client:
 
