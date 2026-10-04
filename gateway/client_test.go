@@ -300,6 +300,62 @@ func TestPostDropsWorkingProxyWithSSLError(t *testing.T) {
 	}
 }
 
+func TestPostDropsWorkingProxyWithSSLErrorWithoutProxies(t *testing.T) {
+	_, pubPEM := newTestKeyPair(t)
+	broken := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(broken.Close)
+
+	c := newTestClient(t, Config{GatewayEndpoint: "http://127.0.0.1:1", PublicKeyPEM: pubPEM})
+	state, _ := json.Marshal(persistedState{Version: stateVersion, WorkingProxy: broken.URL})
+	if err := c.ImportState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{})
+	if code := errCodeOf(t, err); code != SSLError {
+		t.Fatalf("code %d, want %d", code, SSLError)
+	}
+	if c.getWorkingProxy() != "" {
+		t.Fatal("working proxy with a TLS error must be dropped")
+	}
+}
+
+func TestPostPickedProxyNotRetriedInSweep(t *testing.T) {
+	_, pubPEM := newTestKeyPair(t)
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("<html>denied</html>"))
+	}))
+	t.Cleanup(blocked.Close)
+
+	var posts atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, healthPath) {
+			w.Write([]byte("ok"))
+			return
+		}
+		posts.Add(1)
+		w.Write([]byte("<html>denied</html>"))
+	}))
+	t.Cleanup(proxy.Close)
+	storageBody := encryptStorageList(t, pubPEM, []string{proxy.URL})
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(storageBody)
+	}))
+	t.Cleanup(storage.Close)
+
+	c := newTestClient(t, Config{
+		GatewayEndpoint:    blocked.URL,
+		PublicKeyPEM:       pubPEM,
+		S3PrimaryEndpoints: []string{storage.URL},
+	})
+	if _, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{}); err == nil {
+		t.Fatal("want an error when every path is blocked")
+	}
+	if posts.Load() != 1 {
+		t.Fatalf("picked proxy got %d POSTs, want 1", posts.Load())
+	}
+}
+
 func TestPostUsesCachedProxyListWhenStoragesDown(t *testing.T) {
 	priv, pubPEM := newTestKeyPair(t)
 
