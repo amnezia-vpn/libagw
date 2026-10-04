@@ -214,6 +214,92 @@ func TestPostAllPathsBlocked(t *testing.T) {
 	}
 }
 
+func TestPostSSLErrorTriggersFailover(t *testing.T) {
+	priv, pubPEM := newTestKeyPair(t)
+
+	untrusted := httptest.NewTLSServer(gatewayHandler(priv, nil, func([]byte) []byte { return []byte(`{"ok":true}`) }))
+	t.Cleanup(untrusted.Close)
+	proxy, _ := proxyServer(t, priv, func([]byte) []byte { return []byte(`{"services":["via-proxy"]}`) })
+	storageBody := encryptStorageList(t, pubPEM, []string{proxy.URL})
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(storageBody)
+	}))
+	t.Cleanup(storage.Close)
+
+	c := newTestClient(t, Config{
+		GatewayEndpoint:    untrusted.URL,
+		PublicKeyPEM:       pubPEM,
+		S3PrimaryEndpoints: []string{storage.URL},
+	})
+	resp, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{ServiceType: "svc", UserCountryCode: "ru"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(resp.Body) != `{"services":["via-proxy"]}` {
+		t.Fatalf("body: %s", resp.Body)
+	}
+}
+
+func TestPostSSLErrorWithoutProxies(t *testing.T) {
+	priv, pubPEM := newTestKeyPair(t)
+
+	untrusted := httptest.NewTLSServer(gatewayHandler(priv, nil, func([]byte) []byte { return []byte(`{"ok":true}`) }))
+	t.Cleanup(untrusted.Close)
+	storage := httptest.NewServer(http.HandlerFunc(http.NotFound))
+	t.Cleanup(storage.Close)
+
+	c := newTestClient(t, Config{
+		GatewayEndpoint:    untrusted.URL,
+		PublicKeyPEM:       pubPEM,
+		S3PrimaryEndpoints: []string{storage.URL},
+	})
+	_, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{})
+	if code := errCodeOf(t, err); code != SSLError {
+		t.Fatalf("code %d, want %d", code, SSLError)
+	}
+}
+
+func TestPostDropsWorkingProxyWithSSLError(t *testing.T) {
+	priv, pubPEM := newTestKeyPair(t)
+
+	broken := httptest.NewTLSServer(gatewayHandler(priv, nil, func([]byte) []byte { return []byte(`{"ok":true}`) }))
+	t.Cleanup(broken.Close)
+	gw := httptest.NewServer(gatewayHandler(priv, nil, func([]byte) []byte { return []byte(`{"via":"direct"}`) }))
+	t.Cleanup(gw.Close)
+	storage := httptest.NewServer(http.HandlerFunc(http.NotFound))
+	t.Cleanup(storage.Close)
+	proxy, _ := proxyServer(t, priv, func([]byte) []byte { return []byte(`{"via":"proxy"}`) })
+
+	c := newTestClient(t, Config{
+		GatewayEndpoint:    gw.URL,
+		PublicKeyPEM:       pubPEM,
+		S3PrimaryEndpoints: []string{storage.URL},
+	})
+	state, _ := json.Marshal(persistedState{
+		Version:      stateVersion,
+		WorkingProxy: broken.URL,
+		ProxyLists:   map[string][]string{proxyListKey("svc", "de"): {proxy.URL}},
+	})
+	if err := c.ImportState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{ServiceType: "svc", UserCountryCode: "de"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(resp.Body) != `{"via":"proxy"}` {
+		t.Fatalf("body: %s", resp.Body)
+	}
+	var st persistedState
+	if err := json.Unmarshal(c.ExportState(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.WorkingProxy != proxy.URL {
+		t.Fatal("working proxy with a TLS error must be replaced")
+	}
+}
+
 func TestPostUsesCachedProxyListWhenStoragesDown(t *testing.T) {
 	priv, pubPEM := newTestKeyPair(t)
 

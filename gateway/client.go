@@ -149,7 +149,7 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 		return Response{}, ctx.Err()
 	}
 
-	if !att.ssl && shouldBypassProxy(att.kind, att.body, att.decryptOK) {
+	if !c.attemptAccepted(att) {
 		c.log(LogInfo, "direct response suspicious - running proxy failover")
 		att = c.failover(ctx, endpoint, env, opts, att)
 		if ctx.Err() != nil {
