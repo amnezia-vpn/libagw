@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -157,6 +158,101 @@ func TestPostFailoverThroughProxy(t *testing.T) {
 	}
 }
 
+func TestPostKeepsRequestIDAcrossFailover(t *testing.T) {
+	priv, pubPEM := newTestKeyPair(t)
+
+	var mu sync.Mutex
+	var seen []string
+	record := func(r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get("X-Client-Request-ID"))
+		mu.Unlock()
+	}
+
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		w.Write([]byte("<html>access denied</html>"))
+	}))
+	t.Cleanup(blocked.Close)
+
+	brokenProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, healthPath) {
+			w.Write([]byte("ok"))
+			return
+		}
+		record(r)
+		w.Write([]byte("<html>blocked</html>"))
+	}))
+	t.Cleanup(brokenProxy.Close)
+
+	gw := gatewayHandler(priv, nil, func([]byte) []byte { return []byte(`{"ok":true}`) })
+	workingProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, healthPath) {
+			w.Write([]byte("ok"))
+			return
+		}
+		record(r)
+		gw(w, r)
+	}))
+	t.Cleanup(workingProxy.Close)
+
+	storageBody := encryptStorageList(t, pubPEM, []string{brokenProxy.URL, workingProxy.URL})
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(storageBody)
+	}))
+	t.Cleanup(storage.Close)
+
+	c := newTestClient(t, Config{
+		GatewayEndpoint:    blocked.URL,
+		PublicKeyPEM:       pubPEM,
+		S3PrimaryEndpoints: []string{storage.URL},
+	})
+	opts := PostOptions{ServiceType: "amnezia-free", UserCountryCode: "ru"}
+
+	for i := 0; i < 5; i++ {
+		c.setWorkingProxy("")
+		mu.Lock()
+		seen = nil
+		mu.Unlock()
+
+		if _, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), opts); err != nil {
+			t.Fatal(err)
+		}
+
+		mu.Lock()
+		ids := append([]string(nil), seen...)
+		mu.Unlock()
+		if len(ids) < 2 {
+			t.Fatalf("want the direct attempt and at least one proxy attempt, got %d", len(ids))
+		}
+		for _, id := range ids {
+			if id == "" || id != ids[0] {
+				t.Fatalf("request ids differ within one Post: %q", ids)
+			}
+		}
+	}
+
+	mu.Lock()
+	seen = nil
+	mu.Unlock()
+	if _, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), opts); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	first := seen
+	seen = nil
+	mu.Unlock()
+	if _, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), opts); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	second := seen
+	mu.Unlock()
+	if len(first) == 0 || len(second) == 0 || first[0] == second[0] {
+		t.Fatalf("separate Posts must get separate request ids: %q vs %q", first, second)
+	}
+}
+
 func TestPostCaptchaNoFailover(t *testing.T) {
 	priv, pubPEM := newTestKeyPair(t)
 
@@ -211,6 +307,148 @@ func TestPostAllPathsBlocked(t *testing.T) {
 	// decryption error, not a download error.
 	if code := errCodeOf(t, err); code != DecryptError {
 		t.Fatalf("code %d, want %d", code, DecryptError)
+	}
+}
+
+func TestPostSSLErrorTriggersFailover(t *testing.T) {
+	priv, pubPEM := newTestKeyPair(t)
+
+	untrusted := httptest.NewTLSServer(gatewayHandler(priv, nil, func([]byte) []byte { return []byte(`{"ok":true}`) }))
+	t.Cleanup(untrusted.Close)
+	proxy, _ := proxyServer(t, priv, func([]byte) []byte { return []byte(`{"services":["via-proxy"]}`) })
+	storageBody := encryptStorageList(t, pubPEM, []string{proxy.URL})
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(storageBody)
+	}))
+	t.Cleanup(storage.Close)
+
+	c := newTestClient(t, Config{
+		GatewayEndpoint:    untrusted.URL,
+		PublicKeyPEM:       pubPEM,
+		S3PrimaryEndpoints: []string{storage.URL},
+	})
+	resp, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{ServiceType: "svc", UserCountryCode: "ru"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(resp.Body) != `{"services":["via-proxy"]}` {
+		t.Fatalf("body: %s", resp.Body)
+	}
+}
+
+func TestPostSSLErrorWithoutProxies(t *testing.T) {
+	priv, pubPEM := newTestKeyPair(t)
+
+	untrusted := httptest.NewTLSServer(gatewayHandler(priv, nil, func([]byte) []byte { return []byte(`{"ok":true}`) }))
+	t.Cleanup(untrusted.Close)
+	storage := httptest.NewServer(http.HandlerFunc(http.NotFound))
+	t.Cleanup(storage.Close)
+
+	c := newTestClient(t, Config{
+		GatewayEndpoint:    untrusted.URL,
+		PublicKeyPEM:       pubPEM,
+		S3PrimaryEndpoints: []string{storage.URL},
+	})
+	_, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{})
+	if code := errCodeOf(t, err); code != SSLError {
+		t.Fatalf("code %d, want %d", code, SSLError)
+	}
+}
+
+func TestPostDropsWorkingProxyWithSSLError(t *testing.T) {
+	priv, pubPEM := newTestKeyPair(t)
+
+	broken := httptest.NewTLSServer(gatewayHandler(priv, nil, func([]byte) []byte { return []byte(`{"ok":true}`) }))
+	t.Cleanup(broken.Close)
+	gw := httptest.NewServer(gatewayHandler(priv, nil, func([]byte) []byte { return []byte(`{"via":"direct"}`) }))
+	t.Cleanup(gw.Close)
+	storage := httptest.NewServer(http.HandlerFunc(http.NotFound))
+	t.Cleanup(storage.Close)
+	proxy, _ := proxyServer(t, priv, func([]byte) []byte { return []byte(`{"via":"proxy"}`) })
+
+	c := newTestClient(t, Config{
+		GatewayEndpoint:    gw.URL,
+		PublicKeyPEM:       pubPEM,
+		S3PrimaryEndpoints: []string{storage.URL},
+	})
+	state, _ := json.Marshal(persistedState{
+		Version:      stateVersion,
+		WorkingProxy: broken.URL,
+		ProxyLists:   map[string][]string{proxyListKey("svc", "de"): {proxy.URL}},
+	})
+	if err := c.ImportState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{ServiceType: "svc", UserCountryCode: "de"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(resp.Body) != `{"via":"proxy"}` {
+		t.Fatalf("body: %s", resp.Body)
+	}
+	var st persistedState
+	if err := json.Unmarshal(c.ExportState(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.WorkingProxy != proxy.URL {
+		t.Fatal("working proxy with a TLS error must be replaced")
+	}
+}
+
+func TestPostDropsWorkingProxyWithSSLErrorWithoutProxies(t *testing.T) {
+	_, pubPEM := newTestKeyPair(t)
+	broken := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(broken.Close)
+
+	c := newTestClient(t, Config{GatewayEndpoint: "http://127.0.0.1:1", PublicKeyPEM: pubPEM})
+	state, _ := json.Marshal(persistedState{Version: stateVersion, WorkingProxy: broken.URL})
+	if err := c.ImportState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{})
+	if code := errCodeOf(t, err); code != SSLError {
+		t.Fatalf("code %d, want %d", code, SSLError)
+	}
+	if c.getWorkingProxy() != "" {
+		t.Fatal("working proxy with a TLS error must be dropped")
+	}
+}
+
+func TestPostPickedProxyNotRetriedInSweep(t *testing.T) {
+	_, pubPEM := newTestKeyPair(t)
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("<html>denied</html>"))
+	}))
+	t.Cleanup(blocked.Close)
+
+	var posts atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, healthPath) {
+			w.Write([]byte("ok"))
+			return
+		}
+		posts.Add(1)
+		w.Write([]byte("<html>denied</html>"))
+	}))
+	t.Cleanup(proxy.Close)
+	storageBody := encryptStorageList(t, pubPEM, []string{proxy.URL})
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(storageBody)
+	}))
+	t.Cleanup(storage.Close)
+
+	c := newTestClient(t, Config{
+		GatewayEndpoint:    blocked.URL,
+		PublicKeyPEM:       pubPEM,
+		S3PrimaryEndpoints: []string{storage.URL},
+	})
+	if _, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{}); err == nil {
+		t.Fatal("want an error when every path is blocked")
+	}
+	if posts.Load() != 1 {
+		t.Fatalf("picked proxy got %d POSTs, want 1", posts.Load())
 	}
 }
 

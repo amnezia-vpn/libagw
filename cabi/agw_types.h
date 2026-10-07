@@ -22,7 +22,7 @@ extern "C" {
 #define AGW_ERR_INVALID_ARGUMENT 2 /* bad handle or malformed input */
 #define AGW_ERR_CONFIG 3           /* gateway public key missing or invalid */
 #define AGW_ERR_TIMEOUT 4          /* request timed out */
-#define AGW_ERR_SSL 5              /* tls error on the direct path */
+#define AGW_ERR_SSL 5              /* tls error on the last attempt */
 #define AGW_ERR_NETWORK 6          /* gateway unreachable, failover exhausted */
 #define AGW_ERR_DECRYPT 7          /* answer could not be decrypted */
 

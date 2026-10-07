@@ -143,14 +143,18 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 	if !viaProxy {
 		base = c.cfg.GatewayEndpoint
 	}
-	c.log(LogDebug, "direct attempt")
+	if viaProxy {
+		c.log(LogDebug, "saved proxy attempt")
+	} else {
+		c.log(LogDebug, "direct attempt")
+	}
 	att := c.attempt(ctx, base, endpoint, env)
 	if ctx.Err() != nil {
 		return Response{}, ctx.Err()
 	}
 
-	if !att.ssl && shouldBypassProxy(att.kind, att.body, att.decryptOK) {
-		c.log(LogInfo, "direct response suspicious - running proxy failover")
+	if !c.attemptAccepted(att) {
+		c.log(LogInfo, "response suspicious - running proxy failover")
 		att = c.failover(ctx, endpoint, env, opts, att)
 		if ctx.Err() != nil {
 			return Response{}, ctx.Err()
@@ -186,7 +190,7 @@ type attemptResult struct {
 }
 
 func (c *Client) attempt(ctx context.Context, base, endpoint string, env envelope) attemptResult {
-	sr := c.send(ctx, http.MethodPost, joinURL(base, endpoint), env.body, c.cfg.RequestTimeout, newRequestID())
+	sr := c.send(ctx, http.MethodPost, joinURL(base, endpoint), env.body, c.cfg.RequestTimeout, env.requestID)
 	out := attemptResult{kind: sr.kind, ssl: sr.ssl, body: sr.body}
 	if dec, err := aesDecryptCBC(sr.body, env.key, env.iv); err == nil {
 		out.body = dec
@@ -206,11 +210,13 @@ func (c *Client) failover(ctx context.Context, endpoint string, env envelope, op
 	// The proxy used for the direct attempt (if any) just failed: drop it.
 	c.setWorkingProxy("")
 
-	if picked := c.pickHealthyProxy(ctx, proxies); picked != "" {
+	picked := c.pickHealthyProxy(ctx, proxies)
+	if picked != "" {
 		c.log(LogDebug, "healthy proxy found")
 		att := c.attempt(ctx, picked, endpoint, env)
 		if c.attemptAccepted(att) {
 			c.setWorkingProxy(picked)
+			c.log(LogInfo, "healthy proxy answered")
 			return att
 		}
 		last = att
@@ -219,6 +225,9 @@ func (c *Client) failover(ctx context.Context, endpoint string, env envelope, op
 	for i, proxy := range proxies {
 		if ctx.Err() != nil {
 			return last
+		}
+		if proxy == picked {
+			continue
 		}
 		att := c.attempt(ctx, proxy, endpoint, env)
 		last = att
