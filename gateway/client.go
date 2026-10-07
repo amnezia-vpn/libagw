@@ -190,7 +190,7 @@ type attemptResult struct {
 }
 
 func (c *Client) attempt(ctx context.Context, base, endpoint string, env envelope) attemptResult {
-	sr := c.send(ctx, http.MethodPost, joinURL(base, endpoint), env.body, c.cfg.RequestTimeout, newRequestID())
+	sr := c.send(ctx, http.MethodPost, joinURL(base, endpoint), env.body, c.cfg.RequestTimeout, env.requestID)
 	out := attemptResult{kind: sr.kind, ssl: sr.ssl, body: sr.body}
 	if dec, err := aesDecryptCBC(sr.body, env.key, env.iv); err == nil {
 		out.body = dec

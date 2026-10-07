@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -154,6 +155,101 @@ func TestPostFailoverThroughProxy(t *testing.T) {
 	}
 	if proxyHits.Load() < 2 {
 		t.Fatalf("proxy hit %d times, want >= 2", proxyHits.Load())
+	}
+}
+
+func TestPostKeepsRequestIDAcrossFailover(t *testing.T) {
+	priv, pubPEM := newTestKeyPair(t)
+
+	var mu sync.Mutex
+	var seen []string
+	record := func(r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get("X-Client-Request-ID"))
+		mu.Unlock()
+	}
+
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		w.Write([]byte("<html>access denied</html>"))
+	}))
+	t.Cleanup(blocked.Close)
+
+	brokenProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, healthPath) {
+			w.Write([]byte("ok"))
+			return
+		}
+		record(r)
+		w.Write([]byte("<html>blocked</html>"))
+	}))
+	t.Cleanup(brokenProxy.Close)
+
+	gw := gatewayHandler(priv, nil, func([]byte) []byte { return []byte(`{"ok":true}`) })
+	workingProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, healthPath) {
+			w.Write([]byte("ok"))
+			return
+		}
+		record(r)
+		gw(w, r)
+	}))
+	t.Cleanup(workingProxy.Close)
+
+	storageBody := encryptStorageList(t, pubPEM, []string{brokenProxy.URL, workingProxy.URL})
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(storageBody)
+	}))
+	t.Cleanup(storage.Close)
+
+	c := newTestClient(t, Config{
+		GatewayEndpoint:    blocked.URL,
+		PublicKeyPEM:       pubPEM,
+		S3PrimaryEndpoints: []string{storage.URL},
+	})
+	opts := PostOptions{ServiceType: "amnezia-free", UserCountryCode: "ru"}
+
+	for i := 0; i < 5; i++ {
+		c.setWorkingProxy("")
+		mu.Lock()
+		seen = nil
+		mu.Unlock()
+
+		if _, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), opts); err != nil {
+			t.Fatal(err)
+		}
+
+		mu.Lock()
+		ids := append([]string(nil), seen...)
+		mu.Unlock()
+		if len(ids) < 2 {
+			t.Fatalf("want the direct attempt and at least one proxy attempt, got %d", len(ids))
+		}
+		for _, id := range ids {
+			if id == "" || id != ids[0] {
+				t.Fatalf("request ids differ within one Post: %q", ids)
+			}
+		}
+	}
+
+	mu.Lock()
+	seen = nil
+	mu.Unlock()
+	if _, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), opts); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	first := seen
+	seen = nil
+	mu.Unlock()
+	if _, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), opts); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	second := seen
+	mu.Unlock()
+	if len(first) == 0 || len(second) == 0 || first[0] == second[0] {
+		t.Fatalf("separate Posts must get separate request ids: %q vs %q", first, second)
 	}
 }
 
