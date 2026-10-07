@@ -7,7 +7,6 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"math/rand/v2"
@@ -179,7 +178,7 @@ func transportErrorCode(a attemptResult) ErrorCode {
 		return TimeoutError
 	case a.kind == transportConnError:
 		return NetworkError
-	case !a.decryptOK && !bytes.Contains(a.body, updateRequestPattern):
+	case !a.decryptOK:
 		return DecryptError
 	}
 	return NoError

@@ -578,40 +578,6 @@ func TestPostFailoverKeepsProxySavedByConcurrentPost(t *testing.T) {
 	}
 }
 
-func TestPostReturnsPlaintextUpdateRequired(t *testing.T) {
-	_, pubPEM := newTestKeyPair(t)
-
-	const answer = `{"http_status":501,"message":"client version update is required"}`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotImplemented)
-		w.Write([]byte(answer))
-	}))
-	t.Cleanup(srv.Close)
-
-	var storageHits atomic.Int32
-	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		storageHits.Add(1)
-		http.NotFound(w, r)
-	}))
-	t.Cleanup(storage.Close)
-
-	c := newTestClient(t, Config{
-		GatewayEndpoint:    srv.URL,
-		PublicKeyPEM:       pubPEM,
-		S3PrimaryEndpoints: []string{storage.URL},
-	})
-	resp, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{ServiceType: "svc", UserCountryCode: "de"})
-	if err != nil {
-		t.Fatalf("plaintext update-required answer must reach the caller: %v", err)
-	}
-	if string(resp.Body) != answer {
-		t.Fatalf("body: %s", resp.Body)
-	}
-	if storageHits.Load() != 0 {
-		t.Fatal("update-required answer must not trigger proxy failover")
-	}
-}
-
 func TestPostContextCancel(t *testing.T) {
 	priv, pubPEM := newTestKeyPair(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

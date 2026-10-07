@@ -23,8 +23,6 @@ func TestShouldBypassProxy(t *testing.T) {
 		{"404 session not found", transportOK, body(`{"http_status":404,"message":"Session not found"}`), true, false},
 		{"404 unknown", transportOK, body(`{"http_status":404,"message":"nope"}`), true, true},
 		{"501 update required", transportOK, body(`{"http_status":501,"message":"client version update is required"}`), true, false},
-		{"plaintext 501 update required", transportOK, body(`{"http_status":501,"message":"client version update is required"}`), false, false},
-		{"plaintext update required timeout", transportTimeout, body(`{"http_status":501,"message":"client version update is required"}`), false, true},
 		{"501 other", transportOK, body(`{"http_status":501,"message":"not implemented"}`), true, true},
 		{"409 conflict", transportOK, body(`{"http_status":409}`), true, false},
 		{"402 payment required", transportOK, body(`{"http_status":402,"captcha_id":"x"}`), true, false},
