@@ -487,6 +487,131 @@ func TestPostUsesCachedProxyListWhenStoragesDown(t *testing.T) {
 	}
 }
 
+func TestPostSkipsFailedSavedProxyInFailover(t *testing.T) {
+	priv, pubPEM := newTestKeyPair(t)
+
+	var failedPosts atomic.Int32
+	failed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, healthPath) {
+			w.Write([]byte("ok"))
+			return
+		}
+		failedPosts.Add(1)
+		w.Write([]byte("<html>blocked</html>"))
+	}))
+	t.Cleanup(failed.Close)
+	proxy, _ := proxyServer(t, priv, func([]byte) []byte { return []byte(`{"via":"proxy"}`) })
+
+	c := newTestClient(t, Config{GatewayEndpoint: "http://127.0.0.1:1", PublicKeyPEM: pubPEM})
+	state, _ := json.Marshal(persistedState{
+		Version:      stateVersion,
+		WorkingProxy: failed.URL,
+		ProxyLists:   map[string][]string{proxyListKey("svc", "de"): {failed.URL, proxy.URL}},
+	})
+	opts := PostOptions{ServiceType: "svc", UserCountryCode: "de"}
+
+	for i := 0; i < 30; i++ {
+		failedPosts.Store(0)
+		if err := c.ImportState(state); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(resp.Body) != `{"via":"proxy"}` {
+			t.Fatalf("body: %s", resp.Body)
+		}
+		if n := failedPosts.Load(); n != 1 {
+			t.Fatalf("run %d: failed saved proxy got %d POSTs, want 1", i, n)
+		}
+	}
+}
+
+func TestPostFailoverKeepsProxySavedByConcurrentPost(t *testing.T) {
+	priv, pubPEM := newTestKeyPair(t)
+
+	slowArrived := make(chan struct{})
+	releaseSlow := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseSlow) }) }
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "v1/slow") {
+			close(slowArrived)
+			<-releaseSlow
+		}
+		w.Write([]byte("<html>denied</html>"))
+	}))
+	t.Cleanup(blocked.Close)
+	t.Cleanup(release)
+	proxy, _ := proxyServer(t, priv, func([]byte) []byte { return []byte(`{"via":"proxy"}`) })
+
+	c := newTestClient(t, Config{GatewayEndpoint: blocked.URL, PublicKeyPEM: pubPEM})
+	state, _ := json.Marshal(persistedState{
+		Version:    stateVersion,
+		ProxyLists: map[string][]string{proxyListKey("svc", "de"): {proxy.URL}},
+	})
+	if err := c.ImportState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	slowErr := make(chan error, 1)
+	go func() {
+		_, err := c.Post(context.Background(), "v1/slow", []byte(`{}`), PostOptions{ServiceType: "other", UserCountryCode: "ru"})
+		slowErr <- err
+	}()
+	<-slowArrived
+
+	if _, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{ServiceType: "svc", UserCountryCode: "de"}); err != nil {
+		t.Fatal(err)
+	}
+	if c.getWorkingProxy() != proxy.URL {
+		t.Fatal("failover must save the proxy that answered")
+	}
+
+	release()
+	if err := <-slowErr; err == nil {
+		t.Fatal("slow Post has no proxies for its options and must fail")
+	}
+	if c.getWorkingProxy() != proxy.URL {
+		t.Fatal("failover of a direct Post erased the proxy a concurrent Post saved")
+	}
+}
+
+func TestPostReturnsPlaintextUpdateRequired(t *testing.T) {
+	_, pubPEM := newTestKeyPair(t)
+
+	const answer = `{"http_status":501,"message":"client version update is required"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+		w.Write([]byte(answer))
+	}))
+	t.Cleanup(srv.Close)
+
+	var storageHits atomic.Int32
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		storageHits.Add(1)
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(storage.Close)
+
+	c := newTestClient(t, Config{
+		GatewayEndpoint:    srv.URL,
+		PublicKeyPEM:       pubPEM,
+		S3PrimaryEndpoints: []string{storage.URL},
+	})
+	resp, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{ServiceType: "svc", UserCountryCode: "de"})
+	if err != nil {
+		t.Fatalf("plaintext update-required answer must reach the caller: %v", err)
+	}
+	if string(resp.Body) != answer {
+		t.Fatalf("body: %s", resp.Body)
+	}
+	if storageHits.Load() != 0 {
+		t.Fatal("update-required answer must not trigger proxy failover")
+	}
+}
+
 func TestPostContextCancel(t *testing.T) {
 	priv, pubPEM := newTestKeyPair(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

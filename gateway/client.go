@@ -7,10 +7,12 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 )
@@ -138,7 +140,8 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 		return Response{}, ctx.Err()
 	}
 
-	base := c.getWorkingProxy()
+	savedProxy := c.getWorkingProxy()
+	base := savedProxy
 	viaProxy := base != ""
 	if !viaProxy {
 		base = c.cfg.GatewayEndpoint
@@ -155,7 +158,7 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 
 	if !c.attemptAccepted(att) {
 		c.log(LogInfo, "response suspicious - running proxy failover")
-		att = c.failover(ctx, endpoint, env, opts, att)
+		att = c.failover(ctx, endpoint, env, opts, savedProxy, att)
 		if ctx.Err() != nil {
 			return Response{}, ctx.Err()
 		}
@@ -176,7 +179,7 @@ func transportErrorCode(a attemptResult) ErrorCode {
 		return TimeoutError
 	case a.kind == transportConnError:
 		return NetworkError
-	case !a.decryptOK:
+	case !a.decryptOK && !bytes.Contains(a.body, updateRequestPattern):
 		return DecryptError
 	}
 	return NoError
@@ -203,12 +206,15 @@ func (c *Client) attemptAccepted(a attemptResult) bool {
 	return !a.ssl && !shouldBypassProxy(a.kind, a.body, a.decryptOK)
 }
 
-func (c *Client) failover(ctx context.Context, endpoint string, env envelope, opts PostOptions, last attemptResult) attemptResult {
+func (c *Client) failover(ctx context.Context, endpoint string, env envelope, opts PostOptions, savedProxy string, last attemptResult) attemptResult {
 	proxies := c.resolveProxyList(ctx, opts)
+	if savedProxy != "" {
+		proxies = slices.DeleteFunc(proxies, func(p string) bool { return p == savedProxy })
+	}
 	rand.Shuffle(len(proxies), func(i, j int) { proxies[i], proxies[j] = proxies[j], proxies[i] })
 
 	// The proxy used for the direct attempt (if any) just failed: drop it.
-	c.setWorkingProxy("")
+	c.clearWorkingProxy(savedProxy)
 
 	picked := c.pickHealthyProxy(ctx, proxies)
 	if picked != "" {
@@ -299,4 +305,12 @@ func (c *Client) setWorkingProxy(proxy string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.workingProxy = proxy
+}
+
+func (c *Client) clearWorkingProxy(proxy string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.workingProxy == proxy {
+		c.workingProxy = ""
+	}
 }

@@ -37,7 +37,7 @@ func apiStatus(body []byte) (status int, message string) {
 
 func shouldBypassProxy(kind transportErrorKind, body []byte, decryptOK bool) bool {
 	if !decryptOK {
-		return true
+		return kind != transportOK || !bytes.Contains(body, updateRequestPattern)
 	}
 
 	status, message := apiStatus(body)
