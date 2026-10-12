@@ -35,6 +35,7 @@ public:
     {
         int code = 0;
         std::string body;
+        std::string trace;
 
         bool ok() const { return code == AGW_OK; }
         const char *message() const { return agw_error_string(code); }
@@ -81,6 +82,9 @@ public:
         out.code = r.code;
         if (r.body != nullptr) {
             out.body.assign(r.body, r.body_len);
+        }
+        if (r.trace != nullptr) {
+            out.trace.assign(r.trace, r.trace_len);
         }
         agw_result_free(&r);
         return out;

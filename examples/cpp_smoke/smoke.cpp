@@ -1,5 +1,5 @@
-// Offline C++ smoke test: RAII wrapper lifecycle, move semantics, log
-// callback plumbing and state round-trip. No network.
+// Offline C++ smoke test: RAII wrapper lifecycle, move semantics, before-request
+// callback plumbing, trace and state round-trip. No network.
 //
 //   scripts/smoke.sh   (builds the archive and runs this)
 #include <cassert>
@@ -11,12 +11,11 @@
 
 namespace {
 
-int g_logLines = 0;
+int g_beforeRequests = 0;
 
-void onLog(int level, const char *message, void *user_data)
+void onBeforeRequest(const char *host, void *user_data)
 {
-    (void)level;
-    (void)message;
+    (void)host;
     ++*static_cast<int *>(user_data);
 }
 
@@ -24,12 +23,12 @@ void onLog(int level, const char *message, void *user_data)
 
 int main()
 {
-    assert(agw_abi_version() == 1);
+    assert(agw_abi_version() == 2);
 
     agw_callbacks callbacks{};
     callbacks.struct_size = sizeof(agw_callbacks);
-    callbacks.log = &onLog;
-    callbacks.log_user_data = &g_logLines;
+    callbacks.on_before_request = &onBeforeRequest;
+    callbacks.on_before_request_user_data = &g_beforeRequests;
 
     // Invalid config yields an unusable client.
     agw::Client bad("{}", &callbacks);
@@ -40,12 +39,14 @@ int main()
                        &callbacks);
     assert(client.valid());
 
-    // Offline: envelope build fails because the key is garbage.
+    // Offline: envelope build fails because the key is garbage, before any
+    // network attempt, and the trace explains it.
     agw::Client::Result r = client.post("v1/services", "{}");
     assert(!r.ok());
     assert(r.code == AGW_ERR_CONFIG);
     assert(std::string(r.message()).find("public key") != std::string::npos);
-    assert(g_logLines > 0 && "log callback must have fired");
+    assert(r.trace.find("envelope:") != std::string::npos);
+    assert(g_beforeRequests == 0);
 
     // Options JSON is accepted and a malformed one degrades gracefully.
     assert(client.post("v1/services", "{}", R"({"service_type":"svc","user_country_code":"ru"})").code == AGW_ERR_CONFIG);
@@ -67,6 +68,6 @@ int main()
     assert(moved.valid());
     assert(!client.valid());
 
-    std::printf("cpp smoke ok (%d log lines)\n", g_logLines);
+    std::printf("cpp smoke ok\n");
     return 0;
 }

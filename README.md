@@ -67,6 +67,32 @@ Two deliberate improvements over the Qt client:
   settings, the library exposes the caches via `ExportState`/`ImportState` and
   the host owns storage. The blob holds bypass endpoints; keep it protected.
 
+## Diagnostics
+
+There is no log callback. Every `Post` returns, next to the body or the
+error code, a `Trace`: one line per network attempt, in order, saying what
+was tried and what came back —
+
+```
+request 3f1c…-…
+direct: tls: unknown certificate authority, suspicious
+storage 1/4: http 403, 243 bytes
+storage 2/4: http 200, 1812 bytes, 7 proxies
+health 1/7: timeout
+health 2/7: ok
+proxy 2/7: http 200, 1456 bytes, api status 200, accepted
+```
+
+The host writes it into its own log at the level it chooses (for example,
+debug on success, warning when the direct path was rejected, error when the
+call failed) — nothing to wire at startup, no callback threading, and the
+whole story of a failed call sits in one place. Lines never carry endpoint
+addresses: failures are classified (`tls: certificate hostname mismatch`,
+`connect failed: connection refused`, `timeout`, `http 403`), never quoted,
+because these logs are exported and shared by users and the addresses are
+censorship-bypass endpoints. In Go, `Response.Trace` and `Error.Trace`; over
+the C ABI, `agw_result.trace`.
+
 ## Build
 
 Pure Go:

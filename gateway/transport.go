@@ -33,6 +33,7 @@ const (
 type sendResult struct {
 	kind   transportErrorKind
 	ssl    bool
+	err    error
 	status int
 	body   []byte // raw, still encrypted
 }
@@ -51,7 +52,7 @@ func (c *Client) send(ctx context.Context, method, target string, body []byte, t
 
 	req, err := http.NewRequestWithContext(tctx, method, target, bytes.NewReader(body))
 	if err != nil {
-		return sendResult{kind: transportConnError}
+		return sendResult{kind: transportConnError, err: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if requestID != "" {
@@ -60,7 +61,7 @@ func (c *Client) send(ctx context.Context, method, target string, body []byte, t
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return sendResult{kind: classifyTransportError(ctx, err), ssl: isTLSError(err)}
+		return sendResult{kind: classifyTransportError(ctx, err), ssl: isTLSError(err), err: err}
 	}
 	defer resp.Body.Close()
 
@@ -68,6 +69,7 @@ func (c *Client) send(ctx context.Context, method, target string, body []byte, t
 	out := sendResult{status: resp.StatusCode, body: data}
 	if readErr != nil {
 		out.kind = classifyTransportError(ctx, readErr)
+		out.err = readErr
 	}
 	return out
 }

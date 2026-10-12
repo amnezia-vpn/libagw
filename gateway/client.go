@@ -8,22 +8,11 @@ package gateway
 
 import (
 	"context"
-	"fmt"
 	"math/rand/v2"
 	"net/http"
 	"slices"
 	"sync"
 	"time"
-)
-
-// LogLevel of messages passed to Config.Logger.
-type LogLevel int
-
-const (
-	LogDebug LogLevel = iota
-	LogInfo
-	LogWarning
-	LogError
 )
 
 // Config carries everything a Client needs. GatewayEndpoint and
@@ -50,10 +39,6 @@ type Config struct {
 
 	// HTTPClient overrides the transport (custom TLS, uTLS, tests).
 	HTTPClient Doer
-	// Logger receives diagnostic messages; may be nil. Messages never carry
-	// endpoint addresses: hosts route them into application logs that users
-	// export and share, and these are censorship-bypass endpoints.
-	Logger func(LogLevel, string)
 	// OnBeforeRequest is invoked with the target host right before every
 	// network attempt (gateway, storage, health checks, proxies) so hosts
 	// can punch kill-switch exceptions. May be nil.
@@ -67,11 +52,12 @@ type PostOptions struct {
 	UserCountryCode string
 }
 
-// Response is the decrypted gateway answer. Body is the API document as the
-// gateway produced it, including its "http_status" and "message" fields on API
+// Response is the gateway answer. Body is the API document as the gateway
+// produced it, including its "http_status" and "message" fields on API
 // errors; Post never interprets them.
 type Response struct {
-	Body []byte
+	Body  []byte
+	Trace Trace
 }
 
 // Client talks to the Amnezia API gateway. It is safe for concurrent use.
@@ -111,12 +97,6 @@ func New(cfg Config) *Client {
 	return &Client{cfg: cfg, http: cfg.HTTPClient, proxyLists: map[string][]string{}}
 }
 
-func (c *Client) log(level LogLevel, msg string) {
-	if c.cfg.Logger != nil {
-		c.cfg.Logger(level, msg)
-	}
-}
-
 // Post sends one encrypted request to the gateway. endpoint is a path
 // relative to the gateway base (e.g. "v1/services"), payload is the plain
 // JSON document to encrypt. On a suspicious response the request is retried
@@ -130,53 +110,50 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 		return Response{}, ctx.Err()
 	}
 
+	tr := &tracer{}
 	env, err := buildEnvelope(payload, c.cfg.PublicKeyPEM)
 	if err != nil {
-		c.log(LogWarning, "request build failed: "+err.Error())
-		return Response{}, codeError(ConfigError)
+		tr.add("envelope: %s", err.Error())
+		return Response{}, codeError(ConfigError, tr)
 	}
+	tr.add("request %s", env.requestID)
 	if ctx.Err() != nil {
 		return Response{}, ctx.Err()
 	}
 
 	savedProxy := c.getWorkingProxy()
-	base := savedProxy
-	viaProxy := base != ""
-	if !viaProxy {
-		base = c.cfg.GatewayEndpoint
-	}
-	if viaProxy {
-		c.log(LogDebug, "saved proxy attempt")
-	} else {
-		c.log(LogDebug, "direct attempt")
+	base, label := c.cfg.GatewayEndpoint, "direct"
+	if savedProxy != "" {
+		base, label = savedProxy, "saved proxy"
 	}
 	att := c.attempt(ctx, base, endpoint, env)
 	if ctx.Err() != nil {
 		return Response{}, ctx.Err()
 	}
 
-	if !c.attemptAccepted(att) {
-		c.log(LogInfo, "response suspicious - running proxy failover")
-		att = c.failover(ctx, endpoint, env, opts, savedProxy, att)
+	if c.attemptAccepted(att) {
+		tr.add("%s: %s, accepted", label, att.describe())
+	} else {
+		tr.add("%s: %s, suspicious", label, att.describe())
+		att = c.failover(ctx, tr, endpoint, env, opts, savedProxy, att)
 		if ctx.Err() != nil {
 			return Response{}, ctx.Err()
 		}
 	}
 
 	if code := transportErrorCode(att); code != NoError {
-		c.log(LogWarning, "post finished with error: "+ErrorText(code))
-		return Response{}, codeError(code)
+		return Response{}, codeError(code, tr)
 	}
-	return Response{Body: att.body}, nil
+	return Response{Body: att.body, Trace: tr.lines}, nil
 }
 
 func transportErrorCode(a attemptResult) ErrorCode {
 	switch {
-	case a.ssl:
+	case a.send.ssl:
 		return SSLError
-	case a.kind == transportTimeout || a.kind == transportCancelled:
+	case a.send.kind == transportTimeout || a.send.kind == transportCancelled:
 		return TimeoutError
-	case a.kind == transportConnError:
+	case a.send.kind == transportConnError:
 		return NetworkError
 	case !a.decryptOK:
 		return DecryptError
@@ -185,45 +162,47 @@ func transportErrorCode(a attemptResult) ErrorCode {
 }
 
 type attemptResult struct {
-	kind      transportErrorKind
-	ssl       bool
-	body      []byte // decrypted when decryptOK, raw otherwise
+	send      sendResult
+	body      []byte
 	decryptOK bool
 }
 
 func (c *Client) attempt(ctx context.Context, base, endpoint string, env envelope) attemptResult {
 	sr := c.send(ctx, http.MethodPost, joinURL(base, endpoint), env.body, c.cfg.RequestTimeout, env.requestID)
-	out := attemptResult{kind: sr.kind, ssl: sr.ssl, body: sr.body}
+	out := attemptResult{send: sr, body: sr.body}
 	if dec, err := aesDecryptCBC(sr.body, env.key, env.iv); err == nil {
-		out.body = dec
-		out.decryptOK = true
+		out.body, out.decryptOK = dec, true
 	}
 	return out
 }
 
 func (c *Client) attemptAccepted(a attemptResult) bool {
-	return !a.ssl && !shouldBypassProxy(a.kind, a.body, a.decryptOK)
+	return !a.send.ssl && !shouldBypassProxy(a.send.kind, a.body, a.decryptOK)
 }
 
-func (c *Client) failover(ctx context.Context, endpoint string, env envelope, opts PostOptions, savedProxy string, last attemptResult) attemptResult {
-	proxies := c.resolveProxyList(ctx, opts)
+func (c *Client) failover(ctx context.Context, tr *tracer, endpoint string, env envelope, opts PostOptions, savedProxy string, last attemptResult) attemptResult {
+	proxies := c.resolveProxyList(ctx, tr, opts)
 	if savedProxy != "" {
 		proxies = slices.DeleteFunc(proxies, func(p string) bool { return p == savedProxy })
+		// The proxy used for the direct attempt (if any) just failed: drop it.
+		c.clearWorkingProxy(savedProxy)
+		tr.add("saved proxy dropped")
 	}
 	rand.Shuffle(len(proxies), func(i, j int) { proxies[i], proxies[j] = proxies[j], proxies[i] })
+	if len(proxies) == 0 {
+		tr.add("failover: no proxies to try")
+		return last
+	}
 
-	// The proxy used for the direct attempt (if any) just failed: drop it.
-	c.clearWorkingProxy(savedProxy)
-
-	picked := c.pickHealthyProxy(ctx, proxies)
+	picked, pickedIndex := c.pickHealthyProxy(ctx, tr, proxies)
 	if picked != "" {
-		c.log(LogDebug, "healthy proxy found")
 		att := c.attempt(ctx, picked, endpoint, env)
 		if c.attemptAccepted(att) {
 			c.setWorkingProxy(picked)
-			c.log(LogInfo, "healthy proxy answered")
+			tr.add("proxy %d/%d: %s, accepted", pickedIndex+1, len(proxies), att.describe())
 			return att
 		}
+		tr.add("proxy %d/%d: %s, rejected", pickedIndex+1, len(proxies), att.describe())
 		last = att
 	}
 
@@ -238,36 +217,38 @@ func (c *Client) failover(ctx context.Context, endpoint string, env envelope, op
 		last = att
 		if c.attemptAccepted(att) {
 			c.setWorkingProxy(proxy)
-			c.log(LogInfo, fmt.Sprintf("proxy %d/%d answered", i+1, len(proxies)))
+			tr.add("proxy %d/%d: %s, accepted", i+1, len(proxies), att.describe())
 			return att
 		}
-		c.log(LogDebug, fmt.Sprintf("proxy %d/%d unreachable", i+1, len(proxies)))
+		tr.add("proxy %d/%d: %s, rejected", i+1, len(proxies), att.describe())
 	}
-	c.log(LogInfo, "failover exhausted all proxies")
+	tr.add("failover: all %d proxies rejected", len(proxies))
 	return last
 }
 
-func (c *Client) resolveProxyList(ctx context.Context, opts PostOptions) []string {
+func (c *Client) resolveProxyList(ctx context.Context, tr *tracer, opts PostOptions) []string {
 	primary := append([]string(nil), c.cfg.S3PrimaryEndpoints...)
 	fallback := append([]string(nil), c.cfg.S3FallbackEndpoints...)
 	rand.Shuffle(len(primary), func(i, j int) { primary[i], primary[j] = primary[j], primary[i] })
 	rand.Shuffle(len(fallback), func(i, j int) { fallback[i], fallback[j] = fallback[j], fallback[i] })
 
 	key := proxyListKey(opts.ServiceType, opts.UserCountryCode)
-	for _, storageURL := range buildStorageURLs(primary, fallback, opts.ServiceType, opts.UserCountryCode) {
+	storageURLs := buildStorageURLs(primary, fallback, opts.ServiceType, opts.UserCountryCode)
+	for i, storageURL := range storageURLs {
 		if ctx.Err() != nil {
 			return nil
 		}
 		sr := c.send(ctx, http.MethodGet, storageURL, nil, c.cfg.ProxyStorageTimeout, "")
 		if sr.kind != transportOK || sr.ssl || sr.status >= 300 {
-			c.log(LogDebug, "storage unreachable, trying next")
+			tr.add("storage %d/%d: %s", i+1, len(storageURLs), sr.describe())
 			continue
 		}
 		list, err := decodeProxyList(sr.body, c.cfg.IsDevEnvironment, c.cfg.PublicKeyPEM)
 		if err != nil {
-			c.log(LogDebug, "storage object decode failed, trying next")
+			tr.add("storage %d/%d: %s, undecodable list", i+1, len(storageURLs), sr.describe())
 			continue
 		}
+		tr.add("storage %d/%d: %s, %d proxies", i+1, len(storageURLs), sr.describe(), len(list))
 		c.mu.Lock()
 		c.proxyLists[key] = append([]string(nil), list...)
 		c.mu.Unlock()
@@ -277,21 +258,23 @@ func (c *Client) resolveProxyList(ctx context.Context, opts PostOptions) []strin
 	c.mu.Lock()
 	cached := append([]string(nil), c.proxyLists[key]...)
 	c.mu.Unlock()
-	c.log(LogDebug, "all storages unreachable, using cached proxy list")
+	tr.add("proxy list: %d proxies from cache", len(cached))
 	return cached
 }
 
-func (c *Client) pickHealthyProxy(ctx context.Context, proxies []string) string {
-	for _, proxy := range proxies {
+func (c *Client) pickHealthyProxy(ctx context.Context, tr *tracer, proxies []string) (string, int) {
+	for i, proxy := range proxies {
 		if ctx.Err() != nil {
-			return ""
+			return "", -1
 		}
 		sr := c.send(ctx, http.MethodGet, joinURL(proxy, healthPath), nil, c.cfg.ProxyHealthTimeout, "")
 		if sr.kind == transportOK && !sr.ssl && sr.status < 400 {
-			return proxy
+			tr.add("health %d/%d: ok", i+1, len(proxies))
+			return proxy, i
 		}
+		tr.add("health %d/%d: %s", i+1, len(proxies), sr.describe())
 	}
-	return ""
+	return "", -1
 }
 
 func (c *Client) getWorkingProxy() string {

@@ -8,6 +8,9 @@
  * off the UI thread and use a cancel handle to interrupt it. A client handle
  * is safe to use from multiple threads concurrently.
  *
+ * Diagnostics: no log callback; agw_post returns the trace of what it did in
+ * agw_result.trace, for the host to write to its own log.
+ *
  * Memory: every char* returned by this library is owned by the caller and
  * released with agw_result_free / agw_string_free. Strings passed in are
  * copied before the call returns.

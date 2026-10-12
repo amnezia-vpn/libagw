@@ -25,16 +25,16 @@ final class AgwResult extends Struct {
   external Pointer<Uint8> body;
   @Size()
   external int bodyLen;
+  external Pointer<Uint8> trace;
+  @Size()
+  external int traceLen;
 }
 
-typedef AgwLogNative = Void Function(Int32 level, Pointer<Uint8> message, Pointer<Void> userData);
 typedef AgwBeforeRequestNative = Void Function(Pointer<Uint8> host, Pointer<Void> userData);
 
 final class AgwCallbacks extends Struct {
   @Size()
   external int structSize;
-  external Pointer<NativeFunction<AgwLogNative>> log;
-  external Pointer<Void> logUserData;
   external Pointer<NativeFunction<AgwBeforeRequestNative>> onBeforeRequest;
   external Pointer<Void> onBeforeRequestUserData;
 }
@@ -118,7 +118,7 @@ class Agw {
           'agw_error_string');
 
   /// Posts one request; frees the native result before returning.
-  ({int code, String body}) postJson(int client, String endpoint, String payload,
+  ({int code, String body, String trace}) postJson(int client, String endpoint, String payload,
       {String? options, int cancel = 0}) {
     final cEndpoint = toCString(endpoint);
     final cPayload = toCString(payload);
@@ -126,11 +126,12 @@ class Agw {
     try {
       final r = post(client, cEndpoint, cPayload, cOptions, cancel);
       final body = fromCString(r.body);
+      final trace = fromCString(r.trace);
       final holder = calloc<AgwResult>(sizeOf<AgwResult>());
       holder.ref = r;
       resultFree(holder);
       _free(holder.cast<Uint8>());
-      return (code: r.code, body: body);
+      return (code: r.code, body: body, trace: trace);
     } finally {
       _free(cEndpoint);
       _free(cPayload);
@@ -153,7 +154,7 @@ void main(List<String> args) {
   }
 
   final agw = Agw(DynamicLibrary.open(args.first));
-  expect(agw.abiVersion() == 1, 'abi version is 1');
+  expect(agw.abiVersion() == 2, 'abi version is 2');
 
   // Invalid configs are rejected (handle 0).
   final badConfig = toCString('{}');
@@ -172,6 +173,7 @@ void main(List<String> args) {
   // Offline: envelope build fails because the key is garbage (AGW_ERR_CONFIG).
   final r = agw.postJson(client, 'v1/services', '{}');
   expect(r.code == 3, 'garbage public key maps to AGW_ERR_CONFIG, got ${r.code}');
+  expect(r.trace.contains('envelope:'), 'trace explains the failure, got "${r.trace}"');
   expect(fromCString(agw.errorString(3)).isNotEmpty, 'error string is non-empty');
 
   // Options are accepted.
