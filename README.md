@@ -29,7 +29,9 @@ interference (per the ported `shouldBypassProxy` heuristics) it resolves a
 proxy pool from the S3 storage objects — falling back to the cached pool —
 health-checks it, and retries through every proxy until one is accepted. The
 working proxy and proxy lists are cached in memory and can be persisted by the
-host via `ExportState` / `ImportState`.
+host via `ExportState` / `ImportState`. A saved working proxy is tried first;
+when it fails, the direct path is retried before the proxy sweep, so a stale
+cache from a previous run costs one attempt, not a failover.
 
 ```go
 c := gateway.New(gateway.Config{

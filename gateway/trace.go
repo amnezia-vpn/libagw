@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type Trace []string
@@ -27,13 +28,13 @@ func (sr sendResult) describe() string {
 	case sr.ssl:
 		return "tls: " + tlsReason(sr.err)
 	case sr.kind == transportTimeout:
-		return "timeout"
+		return fmt.Sprintf("timeout after %s in %s", sr.elapsed.Round(100*time.Millisecond), sr.phase)
 	case sr.kind == transportCancelled:
 		return "cancelled"
 	case sr.kind == transportConnError:
-		return "connect failed: " + connReason(sr.err)
+		return fmt.Sprintf("connect failed: %s, in %s", connReason(sr.err), sr.phase)
 	}
-	return fmt.Sprintf("http %d, %d bytes", sr.status, len(sr.body))
+	return fmt.Sprintf("http %d, %d bytes, %s", sr.status, len(sr.body), sr.elapsed.Round(100*time.Millisecond))
 }
 
 func (a attemptResult) describe() string {

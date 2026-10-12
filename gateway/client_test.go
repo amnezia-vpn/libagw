@@ -360,7 +360,9 @@ func TestPostDropsWorkingProxyWithSSLError(t *testing.T) {
 
 	broken := httptest.NewTLSServer(gatewayHandler(priv, nil, func([]byte) []byte { return []byte(`{"ok":true}`) }))
 	t.Cleanup(broken.Close)
-	gw := httptest.NewServer(gatewayHandler(priv, nil, func([]byte) []byte { return []byte(`{"via":"direct"}`) }))
+	gw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("<html>blocked</html>"))
+	}))
 	t.Cleanup(gw.Close)
 	storage := httptest.NewServer(http.HandlerFunc(http.NotFound))
 	t.Cleanup(storage.Close)
@@ -408,11 +410,56 @@ func TestPostDropsWorkingProxyWithSSLErrorWithoutProxies(t *testing.T) {
 	}
 
 	_, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{})
-	if code := errCodeOf(t, err); code != SSLError {
-		t.Fatalf("code %d, want %d", code, SSLError)
+	if code := errCodeOf(t, err); code != NetworkError {
+		t.Fatalf("code %d, want %d (the direct attempt is the last one)", code, NetworkError)
 	}
 	if c.getWorkingProxy() != "" {
 		t.Fatal("working proxy with a TLS error must be dropped")
+	}
+}
+
+func TestPostStaleSavedProxyFallsBackToDirect(t *testing.T) {
+	priv, pubPEM := newTestKeyPair(t)
+
+	stale := httptest.NewServer(http.HandlerFunc(http.NotFound))
+	stale.Close()
+	gw := httptest.NewServer(gatewayHandler(priv, nil, func([]byte) []byte { return []byte(`{"via":"direct"}`) }))
+	t.Cleanup(gw.Close)
+	var storageHits atomic.Int32
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		storageHits.Add(1)
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(storage.Close)
+
+	c := newTestClient(t, Config{
+		GatewayEndpoint:    gw.URL,
+		PublicKeyPEM:       pubPEM,
+		S3PrimaryEndpoints: []string{storage.URL},
+	})
+	state, _ := json.Marshal(persistedState{Version: stateVersion, WorkingProxy: stale.URL})
+	if err := c.ImportState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(resp.Body) != `{"via":"direct"}` {
+		t.Fatalf("body: %s", resp.Body)
+	}
+	if storageHits.Load() != 0 {
+		t.Fatal("a working direct path must not start a failover")
+	}
+	if c.getWorkingProxy() != "" {
+		t.Fatal("the stale proxy must be forgotten")
+	}
+	want := []string{"request ", "saved proxy: connect failed: connection refused, in tcp connect, suspicious", "saved proxy dropped", "direct: http 200, "}
+	for i, prefix := range want {
+		if i >= len(resp.Trace) || !strings.HasPrefix(resp.Trace[i], prefix) {
+			t.Fatalf("trace:\n%s", resp.Trace)
+		}
 	}
 }
 
@@ -665,10 +712,10 @@ func TestTraceTellsTheStory(t *testing.T) {
 	}
 	want := []string{
 		"request ",
-		"direct: http 200, 26 bytes, html instead of an answer, suspicious",
+		"direct: http 200, 26 bytes, ",
 		"storage 1/1: http 200, ",
 		"health 1/1: ok",
-		"proxy 1/1: http 200, 16 bytes, api status none, accepted",
+		"proxy 1/1: http 200, 16 bytes, ",
 	}
 	if len(resp.Trace) != len(want) {
 		t.Fatalf("trace:\n%s", resp.Trace)
@@ -731,7 +778,7 @@ func TestTraceCarriesNoEndpointAddresses(t *testing.T) {
 		}
 	}
 	joined := gwErr.Trace.String()
-	for _, reason := range []string{"tls: ", "connect failed: connection refused", "http 404"} {
+	for _, reason := range []string{"tls: ", "connect failed: connection refused, in tcp connect", "http 404"} {
 		if !strings.Contains(joined, reason) {
 			t.Errorf("trace lacks %q:\n%s", reason, joined)
 		}

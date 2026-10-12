@@ -117,24 +117,33 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 		return Response{}, codeError(ConfigError, tr)
 	}
 	tr.add("request %s", env.requestID)
+	if usesEnvironmentProxy(c.cfg.GatewayEndpoint) {
+		tr.add("http proxy taken from the environment")
+	}
 	if ctx.Err() != nil {
 		return Response{}, ctx.Err()
 	}
 
 	savedProxy := c.getWorkingProxy()
-	base, label := c.cfg.GatewayEndpoint, "direct"
+	var att attemptResult
+	accepted := false
 	if savedProxy != "" {
-		base, label = savedProxy, "saved proxy"
+		att, accepted = c.tracedAttempt(ctx, tr, "saved proxy", savedProxy, endpoint, env)
+		if ctx.Err() != nil {
+			return Response{}, ctx.Err()
+		}
+		if !accepted {
+			c.clearWorkingProxy(savedProxy)
+			tr.add("saved proxy dropped")
+		}
 	}
-	att := c.attempt(ctx, base, endpoint, env)
-	if ctx.Err() != nil {
-		return Response{}, ctx.Err()
+	if !accepted {
+		att, accepted = c.tracedAttempt(ctx, tr, "direct", c.cfg.GatewayEndpoint, endpoint, env)
+		if ctx.Err() != nil {
+			return Response{}, ctx.Err()
+		}
 	}
-
-	if c.attemptAccepted(att) {
-		tr.add("%s: %s, accepted", label, att.describe())
-	} else {
-		tr.add("%s: %s, suspicious", label, att.describe())
+	if !accepted {
 		att = c.failover(ctx, tr, endpoint, env, opts, savedProxy, att)
 		if ctx.Err() != nil {
 			return Response{}, ctx.Err()
@@ -176,6 +185,17 @@ func (c *Client) attempt(ctx context.Context, base, endpoint string, env envelop
 	return out
 }
 
+func (c *Client) tracedAttempt(ctx context.Context, tr *tracer, label, base, endpoint string, env envelope) (attemptResult, bool) {
+	att := c.attempt(ctx, base, endpoint, env)
+	accepted := c.attemptAccepted(att)
+	if accepted {
+		tr.add("%s: %s, accepted", label, att.describe())
+	} else {
+		tr.add("%s: %s, suspicious", label, att.describe())
+	}
+	return att, accepted
+}
+
 func (c *Client) attemptAccepted(a attemptResult) bool {
 	return !a.send.ssl && !shouldBypassProxy(a.send.kind, a.body, a.decryptOK)
 }
@@ -184,9 +204,6 @@ func (c *Client) failover(ctx context.Context, tr *tracer, endpoint string, env 
 	proxies := c.resolveProxyList(ctx, tr, opts)
 	if savedProxy != "" {
 		proxies = slices.DeleteFunc(proxies, func(p string) bool { return p == savedProxy })
-		// The proxy used for the direct attempt (if any) just failed: drop it.
-		c.clearWorkingProxy(savedProxy)
-		tr.add("saved proxy dropped")
 	}
 	rand.Shuffle(len(proxies), func(i, j int) { proxies[i], proxies[j] = proxies[j], proxies[i] })
 	if len(proxies) == 0 {
