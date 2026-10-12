@@ -640,7 +640,47 @@ func TestPostMissingPublicKey(t *testing.T) {
 
 // Log messages must not carry endpoint addresses: hosts route them into
 // application logs that users export and share.
-func TestLogsCarryNoEndpointAddresses(t *testing.T) {
+func TestTraceTellsTheStory(t *testing.T) {
+	priv, pubPEM := newTestKeyPair(t)
+
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("<html>access denied</html>"))
+	}))
+	t.Cleanup(blocked.Close)
+	proxy, _ := proxyServer(t, priv, func([]byte) []byte { return []byte(`{"ok":true}`) })
+	storageBody := encryptStorageList(t, pubPEM, []string{proxy.URL})
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(storageBody)
+	}))
+	t.Cleanup(storage.Close)
+
+	c := newTestClient(t, Config{
+		GatewayEndpoint:    blocked.URL,
+		PublicKeyPEM:       pubPEM,
+		S3PrimaryEndpoints: []string{storage.URL},
+	})
+	resp, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"request ",
+		"direct: http 200, 26 bytes, html instead of an answer, suspicious",
+		"storage 1/1: http 200, ",
+		"health 1/1: ok",
+		"proxy 1/1: http 200, 16 bytes, api status none, accepted",
+	}
+	if len(resp.Trace) != len(want) {
+		t.Fatalf("trace:\n%s", resp.Trace)
+	}
+	for i, prefix := range want {
+		if !strings.HasPrefix(resp.Trace[i], prefix) {
+			t.Fatalf("line %d: %q, want prefix %q\nfull trace:\n%s", i, resp.Trace[i], prefix, resp.Trace)
+		}
+	}
+}
+
+func TestTraceCarriesNoEndpointAddresses(t *testing.T) {
 	_, pubPEM := newTestKeyPair(t)
 
 	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -651,36 +691,49 @@ func TestLogsCarryNoEndpointAddresses(t *testing.T) {
 	t.Cleanup(storage.Close)
 	proxy := httptest.NewServer(http.HandlerFunc(http.NotFound))
 	t.Cleanup(proxy.Close)
+	untrusted := httptest.NewTLSServer(http.HandlerFunc(http.NotFound))
+	t.Cleanup(untrusted.Close)
+	refused := httptest.NewServer(http.HandlerFunc(http.NotFound))
+	refused.Close()
 
-	var lines []string
 	c := newTestClient(t, Config{
 		GatewayEndpoint:    blocked.URL,
 		PublicKeyPEM:       pubPEM,
 		S3PrimaryEndpoints: []string{storage.URL},
-		Logger: func(_ LogLevel, msg string) {
-			lines = append(lines, msg)
-		},
 	})
 	state, _ := json.Marshal(persistedState{
 		Version:    stateVersion,
-		ProxyLists: map[string][]string{proxyListKey("svc", "de"): {proxy.URL}},
+		ProxyLists: map[string][]string{proxyListKey("svc", "de"): {proxy.URL, untrusted.URL, refused.URL}},
 	})
 	if err := c.ImportState(state); err != nil {
 		t.Fatal(err)
 	}
 
-	c.Post(context.Background(), testEndpoint, []byte(`{}`),
+	_, err := c.Post(context.Background(), testEndpoint, []byte(`{}`),
 		PostOptions{ServiceType: "svc", UserCountryCode: "de"})
-
-	if len(lines) == 0 {
-		t.Fatal("expected progress messages")
+	var gwErr *Error
+	if !errors.As(err, &gwErr) {
+		t.Fatalf("want *Error, got %v", err)
 	}
-	for _, host := range []string{blocked.URL, storage.URL, proxy.URL} {
-		bare := strings.TrimPrefix(host, "http://")
-		for _, line := range lines {
-			if strings.Contains(line, host) || strings.Contains(line, bare) {
-				t.Errorf("log line leaks an endpoint address: %q", line)
+	if len(gwErr.Trace) < 6 {
+		t.Fatalf("expected a full account of the failover, got:\n%s", gwErr.Trace)
+	}
+	if gwErr.Trace[len(gwErr.Trace)-1] != "result: "+ErrorText(gwErr.Code) {
+		t.Fatalf("last line: %q", gwErr.Trace[len(gwErr.Trace)-1])
+	}
+	for _, host := range []string{blocked.URL, storage.URL, proxy.URL, untrusted.URL, refused.URL} {
+		bare := strings.TrimPrefix(strings.TrimPrefix(host, "http://"), "https://")
+		port := bare[strings.LastIndex(bare, ":"):]
+		for _, line := range gwErr.Trace {
+			if strings.Contains(line, bare) || strings.Contains(line, port) {
+				t.Errorf("trace line leaks an endpoint address: %q", line)
 			}
+		}
+	}
+	joined := gwErr.Trace.String()
+	for _, reason := range []string{"tls: ", "connect failed: connection refused", "http 404"} {
+		if !strings.Contains(joined, reason) {
+			t.Errorf("trace lacks %q:\n%s", reason, joined)
 		}
 	}
 }
