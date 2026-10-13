@@ -25,7 +25,7 @@ import (
 	"github.com/amnezia-vpn/libagw/gateway"
 )
 
-const abiVersion = 1
+const abiVersion = 2
 
 type clientBox struct {
 	client *gateway.Client
@@ -126,24 +126,13 @@ func agw_client_create(configJSON *C.char, callbacks *C.agw_callbacks) C.agw_cli
 	}
 
 	// Snapshotted: the caller may free the struct after this returns.
-	if callbacks != nil {
-		if callbacks.log != nil {
-			logFn := callbacks.log
-			logUD := callbacks.log_user_data
-			gcfg.Logger = func(level gateway.LogLevel, msg string) {
-				cmsg := C.CString(msg)
-				defer C.free(unsafe.Pointer(cmsg))
-				C.agw_bridge_log(logFn, C.int(level), cmsg, logUD)
-			}
-		}
-		if callbacks.on_before_request != nil {
-			reqFn := callbacks.on_before_request
-			reqUD := callbacks.on_before_request_user_data
-			gcfg.OnBeforeRequest = func(host string) {
-				chost := C.CString(host)
-				defer C.free(unsafe.Pointer(chost))
-				C.agw_bridge_before_request(reqFn, chost, reqUD)
-			}
+	if callbacks != nil && callbacks.on_before_request != nil {
+		reqFn := callbacks.on_before_request
+		reqUD := callbacks.on_before_request_user_data
+		gcfg.OnBeforeRequest = func(host string) {
+			chost := C.CString(host)
+			defer C.free(unsafe.Pointer(chost))
+			C.agw_bridge_before_request(reqFn, chost, reqUD)
 		}
 	}
 
@@ -160,7 +149,7 @@ func agw_client_destroy(client C.agw_client_handle) {
 func agw_post(client C.agw_client_handle, endpoint, payloadJSON, optionsJSON *C.char, cancel C.agw_cancel_handle) C.agw_result {
 	box := clientFrom(client)
 	if box == nil {
-		return makeResult(C.AGW_ERR_INVALID_ARGUMENT, nil)
+		return makeResult(C.AGW_ERR_INVALID_ARGUMENT, nil, "")
 	}
 
 	var opts abiOptions
@@ -179,7 +168,7 @@ func agw_post(client C.agw_client_handle, endpoint, payloadJSON, optionsJSON *C.
 		ServiceType:     opts.ServiceType,
 		UserCountryCode: opts.UserCountryCode,
 	})
-	return makeResult(errorCodeOf(err), resp.Body)
+	return makeResult(errorCodeOf(err), resp.Body, traceOf(resp, err))
 }
 
 func errorCodeOf(err error) int32 {
@@ -196,12 +185,27 @@ func errorCodeOf(err error) int32 {
 	return int32(gateway.NetworkError)
 }
 
-func makeResult(code int32, body []byte) C.agw_result {
+func traceOf(resp gateway.Response, err error) string {
+	if err == nil {
+		return resp.Trace.String()
+	}
+	var gwErr *gateway.Error
+	if errors.As(err, &gwErr) {
+		return gwErr.Trace.String()
+	}
+	return "cancelled"
+}
+
+func makeResult(code int32, body []byte, trace string) C.agw_result {
 	var r C.agw_result
 	r.code = C.int32_t(code)
 	if len(body) > 0 {
 		r.body = (*C.char)(C.CBytes(append(body, 0)))
 		r.body_len = C.size_t(len(body))
+	}
+	if trace != "" {
+		r.trace = C.CString(trace)
+		r.trace_len = C.size_t(len(trace))
 	}
 	return r
 }
@@ -216,6 +220,11 @@ func agw_result_free(result *C.agw_result) {
 		result.body = nil
 	}
 	result.body_len = 0
+	if result.trace != nil {
+		C.free(unsafe.Pointer(result.trace))
+		result.trace = nil
+	}
+	result.trace_len = 0
 }
 
 //export agw_cancel_create

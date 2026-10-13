@@ -1,5 +1,5 @@
 /* Offline smoke test for the C ABI: no network, exercises handle lifecycle,
- * error codes, state round-trip and cancellation plumbing.
+ * error codes, trace, state round-trip and cancellation plumbing.
  *
  *   go build -buildmode=c-archive -o libagw.a ./archive
  *   cc examples/c_smoke/smoke.c libagw.a -Icabi -o smoke && ./smoke
@@ -15,7 +15,7 @@
 
 int main(void)
 {
-    assert(agw_abi_version() == 1);
+    assert(agw_abi_version() == 2);
 
     /* Invalid configs are rejected. */
     assert(agw_client_create(NULL, NULL) == 0);
@@ -31,11 +31,16 @@ int main(void)
             NULL);
     assert(client != 0);
 
-    /* Envelope build fails offline: the key is garbage. */
+    /* Envelope build fails offline: the key is garbage. The trace says so. */
     agw_result r = agw_post(client, "v1/services", "{}", NULL, 0);
     assert(r.code == AGW_ERR_CONFIG);
+    assert(r.body == NULL && r.body_len == 0);
+    assert(r.trace != NULL && r.trace_len == strlen(r.trace));
+    assert(strstr(r.trace, "envelope:") != NULL);
+    assert(strstr(r.trace, "result: gateway public key") != NULL);
     agw_result_free(&r);
     assert(r.body == NULL && r.body_len == 0);
+    assert(r.trace == NULL && r.trace_len == 0);
 
     const char *msg = agw_error_string(AGW_ERR_CONFIG);
     assert(msg != NULL && strlen(msg) > 0);
@@ -52,6 +57,10 @@ int main(void)
     assert(cancel != 0);
     agw_cancel_cancel(cancel);
     agw_cancel_cancel(cancel);
+    r = agw_post(client, "v1/services", "{}", NULL, cancel);
+    assert(r.code == AGW_CANCELLED);
+    assert(r.trace != NULL);
+    agw_result_free(&r);
     agw_cancel_destroy(cancel);
 
     /* Misused handles never crash the process: a destroyed or garbage handle
@@ -65,6 +74,7 @@ int main(void)
     agw_client_destroy(client);              /* double destroy */
     r = agw_post(client, "v1/services", "{}", NULL, 0);
     assert(r.code == AGW_ERR_INVALID_ARGUMENT);
+    assert(r.trace == NULL);
     agw_result_free(&r);
     r = agw_post((agw_client_handle)0xdeadbeef, "v1/services", "{}", NULL, 0);
     assert(r.code == AGW_ERR_INVALID_ARGUMENT);

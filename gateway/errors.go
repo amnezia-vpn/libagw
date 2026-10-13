@@ -3,9 +3,9 @@ package gateway
 import "fmt"
 
 // ErrorCode classifies the outcomes in which there is no gateway answer to
-// interpret. Whenever the gateway did answer, Post returns the decrypted body
-// with a nil error regardless of the API status inside it — reading that
-// status is the caller's business. Values are shared with cabi/agw_types.h.
+// interpret. Whenever the gateway did answer, Post returns the body with a nil
+// error regardless of the API status inside it — reading that status is the
+// caller's business. Values are shared with cabi/agw_types.h.
 type ErrorCode int
 
 const (
@@ -36,11 +36,15 @@ func ErrorText(code ErrorCode) string {
 
 // Error is the error type returned by Client.Post.
 type Error struct {
-	Code ErrorCode
+	Code  ErrorCode
+	Trace Trace
 }
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("gateway: %s (%d)", ErrorText(e.Code), int(e.Code))
 }
 
-func codeError(code ErrorCode) *Error { return &Error{Code: code} }
+func codeError(code ErrorCode, tr *tracer) *Error {
+	tr.add("result: %s", ErrorText(code))
+	return &Error{Code: code, Trace: tr.lines}
+}

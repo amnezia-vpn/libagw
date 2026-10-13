@@ -38,9 +38,10 @@ type requestBody struct {
 }
 
 type envelope struct {
-	body []byte
-	key  []byte
-	iv   []byte
+	body      []byte
+	key       []byte
+	iv        []byte
+	requestID string
 }
 
 // Two oddities are deliberate, matching what the server expects: the "iv" is
@@ -87,7 +88,7 @@ func buildEnvelope(payload, publicKeyPEM []byte) (envelope, error) {
 	if err != nil {
 		return envelope{}, err
 	}
-	return envelope{body: body, key: key, iv: iv}, nil
+	return envelope{body: body, key: key, iv: iv, requestID: newRequestID()}, nil
 }
 
 func parsePublicKey(pemBytes []byte) (*rsa.PublicKey, error) {

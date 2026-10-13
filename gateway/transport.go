@@ -10,8 +10,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,10 +33,37 @@ const (
 )
 
 type sendResult struct {
-	kind   transportErrorKind
-	ssl    bool
-	status int
-	body   []byte // raw, still encrypted
+	kind    transportErrorKind
+	ssl     bool
+	err     error
+	status  int
+	body    []byte // raw, still encrypted
+	phase   string
+	elapsed time.Duration
+}
+
+var phaseNames = []string{"tcp connect", "dns lookup", "tcp connect", "tls handshake", "waiting for response", "reading response"}
+
+type phaseTracker struct{ current atomic.Int32 }
+
+func (p *phaseTracker) set(i int32) { p.current.Store(i) }
+
+func (p *phaseTracker) name() string { return phaseNames[p.current.Load()] }
+
+func (p *phaseTracker) clientTrace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		DNSStart: func(httptrace.DNSStartInfo) { p.set(1) },
+		DNSDone: func(info httptrace.DNSDoneInfo) {
+			if info.Err == nil {
+				p.set(2)
+			}
+		},
+		ConnectStart:         func(string, string) { p.set(2) },
+		TLSHandshakeStart:    func() { p.set(3) },
+		TLSHandshakeDone:     func(tls.ConnectionState, error) { p.set(4) },
+		WroteRequest:         func(httptrace.WroteRequestInfo) { p.set(4) },
+		GotFirstResponseByte: func() { p.set(5) },
+	}
 }
 
 const maxResponseBytes = 32 << 20
@@ -49,9 +78,11 @@ func (c *Client) send(ctx context.Context, method, target string, body []byte, t
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(tctx, method, target, bytes.NewReader(body))
+	var phase phaseTracker
+	started := time.Now()
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(tctx, phase.clientTrace()), method, target, bytes.NewReader(body))
 	if err != nil {
-		return sendResult{kind: transportConnError}
+		return sendResult{kind: transportConnError, err: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if requestID != "" {
@@ -60,16 +91,26 @@ func (c *Client) send(ctx context.Context, method, target string, body []byte, t
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return sendResult{kind: classifyTransportError(ctx, err), ssl: isTLSError(err)}
+		return sendResult{kind: classifyTransportError(ctx, err), ssl: isTLSError(err), err: err, phase: phase.name(), elapsed: time.Since(started)}
 	}
 	defer resp.Body.Close()
 
 	data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	out := sendResult{status: resp.StatusCode, body: data}
+	out := sendResult{status: resp.StatusCode, body: data, phase: phase.name(), elapsed: time.Since(started)}
 	if readErr != nil {
 		out.kind = classifyTransportError(ctx, readErr)
+		out.err = readErr
 	}
 	return out
+}
+
+func usesEnvironmentProxy(target string) bool {
+	u, err := url.Parse(target)
+	if err != nil {
+		return false
+	}
+	proxy, err := http.ProxyFromEnvironment(&http.Request{URL: u})
+	return err == nil && proxy != nil
 }
 
 func classifyTransportError(parent context.Context, err error) transportErrorKind {
