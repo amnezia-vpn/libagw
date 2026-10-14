@@ -642,6 +642,43 @@ func TestPostContextCancel(t *testing.T) {
 	}
 }
 
+func TestCancelledPostKeepsTheAttemptsMadeSoFar(t *testing.T) {
+	_, pubPEM := newTestKeyPair(t)
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+	}))
+	t.Cleanup(gateway.Close)
+	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(storage.Close)
+
+	c := newTestClient(t, Config{
+		GatewayEndpoint:     gateway.URL,
+		PublicKeyPEM:        pubPEM,
+		S3PrimaryEndpoints:  []string{storage.URL},
+		RequestTimeout:      100 * time.Millisecond,
+		ProxyStorageTimeout: 5 * time.Second,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_, err := c.Post(ctx, testEndpoint, []byte(`{}`), PostOptions{})
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want a context error, got %v", err)
+	}
+	var cancelled *CancelledError
+	if !errors.As(err, &cancelled) {
+		t.Fatalf("want a *CancelledError, got %T", err)
+	}
+	trace := cancelled.Trace.String()
+	for _, want := range []string{"request ", "direct: timeout after", "storage 1/1: cancelled", "cancelled after"} {
+		if !strings.Contains(trace, want) {
+			t.Errorf("trace lacks %q:\n%s", want, trace)
+		}
+	}
+}
+
 func TestStateRoundTrip(t *testing.T) {
 	_, pubPEM := newTestKeyPair(t)
 	c := newTestClient(t, Config{GatewayEndpoint: "https://gw", PublicKeyPEM: pubPEM})

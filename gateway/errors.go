@@ -1,6 +1,10 @@
 package gateway
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+	"time"
+)
 
 // ErrorCode classifies the outcomes in which there is no gateway answer to
 // interpret. Whenever the gateway did answer, Post returns the body with a nil
@@ -42,6 +46,22 @@ type Error struct {
 
 func (e *Error) Error() string {
 	return fmt.Sprintf("gateway: %s (%d)", ErrorText(e.Code), int(e.Code))
+}
+
+// CancelledError is returned by Client.Post when ctx ends before the gateway
+// answered. It carries the attempts made until then and unwraps to ctx.Err().
+type CancelledError struct {
+	Err   error
+	Trace Trace
+}
+
+func (e *CancelledError) Error() string { return "gateway: " + e.Err.Error() }
+
+func (e *CancelledError) Unwrap() error { return e.Err }
+
+func cancelledError(ctx context.Context, tr *tracer, began time.Time) *CancelledError {
+	tr.add("cancelled after %s", time.Since(began).Round(100*time.Millisecond))
+	return &CancelledError{Err: ctx.Err(), Trace: tr.lines}
 }
 
 func codeError(code ErrorCode, tr *tracer) *Error {

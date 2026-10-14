@@ -193,6 +193,10 @@ func traceOf(resp gateway.Response, err error) string {
 	if errors.As(err, &gwErr) {
 		return gwErr.Trace.String()
 	}
+	var cancelled *gateway.CancelledError
+	if errors.As(err, &cancelled) {
+		return cancelled.Trace.String()
+	}
 	return "cancelled"
 }
 

@@ -102,15 +102,16 @@ func New(cfg Config) *Client {
 // JSON document to encrypt. On a suspicious response the request is retried
 // through the proxy pool resolved from the S3 storages.
 //
-// The returned error is either a *Error carrying an ErrorCode, or ctx.Err()
-// when the context was cancelled. Response.Body is set only on a nil error.
+// The returned error is either a *Error carrying an ErrorCode, or a
+// *CancelledError (unwrapping to ctx.Err()) when the context was cancelled. Response.Body is set only on a nil error.
 func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts PostOptions) (Response, error) {
+	began := time.Now()
+	tr := &tracer{}
 	// An already-cancelled caller wins over any other outcome.
 	if ctx.Err() != nil {
-		return Response{}, ctx.Err()
+		return Response{}, cancelledError(ctx, tr, began)
 	}
 
-	tr := &tracer{}
 	env, err := buildEnvelope(payload, c.cfg.PublicKeyPEM)
 	if err != nil {
 		tr.add("envelope: %s", err.Error())
@@ -121,7 +122,7 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 		tr.add("http proxy taken from the environment")
 	}
 	if ctx.Err() != nil {
-		return Response{}, ctx.Err()
+		return Response{}, cancelledError(ctx, tr, began)
 	}
 
 	savedProxy := c.getWorkingProxy()
@@ -130,7 +131,7 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 	if savedProxy != "" {
 		att, accepted = c.tracedAttempt(ctx, tr, "saved proxy", savedProxy, endpoint, env)
 		if ctx.Err() != nil {
-			return Response{}, ctx.Err()
+			return Response{}, cancelledError(ctx, tr, began)
 		}
 		if !accepted {
 			c.clearWorkingProxy(savedProxy)
@@ -140,13 +141,13 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 	if !accepted {
 		att, accepted = c.tracedAttempt(ctx, tr, "direct", c.cfg.GatewayEndpoint, endpoint, env)
 		if ctx.Err() != nil {
-			return Response{}, ctx.Err()
+			return Response{}, cancelledError(ctx, tr, began)
 		}
 	}
 	if !accepted {
 		att = c.failover(ctx, tr, endpoint, env, opts, savedProxy, att)
 		if ctx.Err() != nil {
-			return Response{}, ctx.Err()
+			return Response{}, cancelledError(ctx, tr, began)
 		}
 	}
 
