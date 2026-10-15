@@ -34,6 +34,7 @@ type Config struct {
 	IsDevEnvironment bool
 
 	RequestTimeout      time.Duration // gateway POST, default 12s
+	ProxyRequestTimeout time.Duration // POST through a proxy, defaults to RequestTimeout
 	ProxyStorageTimeout time.Duration // storage GET, default 3s
 	ProxyHealthTimeout  time.Duration // proxy health GET, default 1s
 
@@ -85,6 +86,9 @@ func New(cfg Config) *Client {
 	if cfg.RequestTimeout <= 0 {
 		cfg.RequestTimeout = defaultRequestTimeout
 	}
+	if cfg.ProxyRequestTimeout <= 0 {
+		cfg.ProxyRequestTimeout = cfg.RequestTimeout
+	}
 	if cfg.ProxyStorageTimeout <= 0 {
 		cfg.ProxyStorageTimeout = defaultProxyStorageTimeout
 	}
@@ -129,7 +133,7 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 	var att attemptResult
 	accepted := false
 	if savedProxy != "" {
-		att, accepted = c.tracedAttempt(ctx, tr, "saved proxy", savedProxy, endpoint, env)
+		att, accepted = c.tracedAttempt(ctx, tr, "saved proxy", savedProxy, endpoint, env, c.cfg.ProxyRequestTimeout)
 		if ctx.Err() != nil {
 			return Response{}, cancelledError(ctx, tr, began)
 		}
@@ -139,7 +143,7 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 		}
 	}
 	if !accepted {
-		att, accepted = c.tracedAttempt(ctx, tr, "direct", c.cfg.GatewayEndpoint, endpoint, env)
+		att, accepted = c.tracedAttempt(ctx, tr, "direct", c.cfg.GatewayEndpoint, endpoint, env, c.cfg.RequestTimeout)
 		if ctx.Err() != nil {
 			return Response{}, cancelledError(ctx, tr, began)
 		}
@@ -177,8 +181,8 @@ type attemptResult struct {
 	decryptOK bool
 }
 
-func (c *Client) attempt(ctx context.Context, base, endpoint string, env envelope) attemptResult {
-	sr := c.send(ctx, http.MethodPost, joinURL(base, endpoint), env.body, c.cfg.RequestTimeout, env.requestID)
+func (c *Client) attempt(ctx context.Context, base, endpoint string, env envelope, timeout time.Duration) attemptResult {
+	sr := c.send(ctx, http.MethodPost, joinURL(base, endpoint), env.body, timeout, env.requestID)
 	out := attemptResult{send: sr, body: sr.body}
 	if dec, err := aesDecryptCBC(sr.body, env.key, env.iv); err == nil {
 		out.body, out.decryptOK = dec, true
@@ -186,8 +190,8 @@ func (c *Client) attempt(ctx context.Context, base, endpoint string, env envelop
 	return out
 }
 
-func (c *Client) tracedAttempt(ctx context.Context, tr *tracer, label, base, endpoint string, env envelope) (attemptResult, bool) {
-	att := c.attempt(ctx, base, endpoint, env)
+func (c *Client) tracedAttempt(ctx context.Context, tr *tracer, label, base, endpoint string, env envelope, timeout time.Duration) (attemptResult, bool) {
+	att := c.attempt(ctx, base, endpoint, env, timeout)
 	accepted := c.attemptAccepted(att)
 	if accepted {
 		tr.add("%s: %s, accepted", label, att.describe())
@@ -214,7 +218,7 @@ func (c *Client) failover(ctx context.Context, tr *tracer, endpoint string, env 
 
 	picked, pickedIndex := c.pickHealthyProxy(ctx, tr, proxies)
 	if picked != "" {
-		att := c.attempt(ctx, picked, endpoint, env)
+		att := c.attempt(ctx, picked, endpoint, env, c.cfg.ProxyRequestTimeout)
 		if c.attemptAccepted(att) {
 			c.setWorkingProxy(picked)
 			tr.add("proxy %d/%d: %s, accepted", pickedIndex+1, len(proxies), att.describe())
@@ -231,7 +235,7 @@ func (c *Client) failover(ctx context.Context, tr *tracer, endpoint string, env 
 		if proxy == picked {
 			continue
 		}
-		att := c.attempt(ctx, proxy, endpoint, env)
+		att := c.attempt(ctx, proxy, endpoint, env, c.cfg.ProxyRequestTimeout)
 		last = att
 		if c.attemptAccepted(att) {
 			c.setWorkingProxy(proxy)

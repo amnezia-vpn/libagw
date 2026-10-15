@@ -46,6 +46,17 @@ resp, err := c.Post(ctx, "v1/services", payloadJSON,
 `Post` blocks for up to the full failover sequence; run it off the UI thread
 and cancel via `ctx`.
 
+Each network attempt has its own timeout, set once when the client is created:
+
+| `gateway.Config`      | C ABI config key              | Bounds                          | Default          |
+|-----------------------|-------------------------------|---------------------------------|------------------|
+| `RequestTimeout`      | `request_timeout_msecs`       | the POST to the gateway itself  | 12s              |
+| `ProxyRequestTimeout` | `proxy_request_timeout_msecs` | the POST through a proxy        | `RequestTimeout` |
+| `ProxyStorageTimeout` | `proxy_storage_timeout_msecs` | each proxy-list storage GET     | 3s               |
+| `ProxyHealthTimeout`  | `proxy_health_timeout_msecs`  | each proxy health check         | 1s               |
+
+A missing or non-positive value takes the default.
+
 ## Parity with amnezia-client
 
 The wire protocol and failover behaviour are ported faithfully from
