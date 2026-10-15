@@ -43,6 +43,7 @@ type abiConfig struct {
 	S3FallbackEndpoints      []string `json:"s3_fallback_endpoints"`
 	IsDevEnvironment         bool     `json:"is_dev_environment"`
 	RequestTimeoutMsecs      int      `json:"request_timeout_msecs"`
+	ProxyRequestTimeoutMsecs int      `json:"proxy_request_timeout_msecs"`
 	ProxyStorageTimeoutMsecs int      `json:"proxy_storage_timeout_msecs"`
 	ProxyHealthTimeoutMsecs  int      `json:"proxy_health_timeout_msecs"`
 }
@@ -121,6 +122,7 @@ func agw_client_create(configJSON *C.char, callbacks *C.agw_callbacks) C.agw_cli
 		S3FallbackEndpoints: cfg.S3FallbackEndpoints,
 		IsDevEnvironment:    cfg.IsDevEnvironment,
 		RequestTimeout:      time.Duration(cfg.RequestTimeoutMsecs) * time.Millisecond,
+		ProxyRequestTimeout: time.Duration(cfg.ProxyRequestTimeoutMsecs) * time.Millisecond,
 		ProxyStorageTimeout: time.Duration(cfg.ProxyStorageTimeoutMsecs) * time.Millisecond,
 		ProxyHealthTimeout:  time.Duration(cfg.ProxyHealthTimeoutMsecs) * time.Millisecond,
 	}

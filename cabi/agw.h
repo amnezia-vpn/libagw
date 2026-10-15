@@ -34,10 +34,13 @@ uint32_t agw_abi_version(void);
  *   "s3_primary_endpoints": ["https://...", ...],
  *   "s3_fallback_endpoints": ["https://...", ...],
  *   "is_dev_environment": false,
- *   "request_timeout_msecs": 12000,
- *   "proxy_storage_timeout_msecs": 3000,
- *   "proxy_health_timeout_msecs": 1000
+ *   "request_timeout_msecs": 12000,         gateway POST
+ *   "proxy_request_timeout_msecs": 12000,   POST through a proxy, defaults to request_timeout_msecs
+ *   "proxy_storage_timeout_msecs": 3000,    proxy-list storage GET
+ *   "proxy_health_timeout_msecs": 1000      proxy health GET
  * }
+ * Every timeout bounds one network attempt; a missing or non-positive value
+ * takes the default.
  * callbacks may be NULL. Returns 0 on invalid input. */
 agw_client_handle agw_client_create(const char *config_json, const agw_callbacks *callbacks);
 /* Destroying a handle twice, or passing a handle of the other kind, is a no-op;
