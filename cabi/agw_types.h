@@ -34,7 +34,8 @@ typedef void (*agw_before_request_fn)(const char *host, void *user_data);
 
 /* Host callbacks. struct_size must be set to sizeof(agw_callbacks) by the
  * caller; it versions the struct for future additions. Callbacks are invoked
- * on the thread that called agw_post, before each network attempt. */
+ * before each network attempt, from threads of the library: proxy health
+ * checks run in parallel, so a callback may be called concurrently. */
 typedef struct {
     size_t struct_size;
     agw_before_request_fn on_before_request;

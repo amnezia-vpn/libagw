@@ -37,8 +37,11 @@ esac
 OUT="build/${GOOS}_${GOARCH}"
 mkdir -p "$OUT"
 
-echo "building $BUILDMODE for ${GOOS}/${GOARCH} -> ${OUT}/libagw.${EXT}"
+DEFAULT_GODEBUG="$(go list -f '{{.DefaultGODEBUG}}' ./archive)"
+GODEBUG_VALUE="${DEFAULT_GODEBUG:+${DEFAULT_GODEBUG},}asyncpreemptoff=1"
+
+echo "building $BUILDMODE for ${GOOS}/${GOARCH} -> ${OUT}/libagw.${EXT} (godebug ${GODEBUG_VALUE})"
 CGO_ENABLED=1 GOOS="$GOOS" GOARCH="$GOARCH" \
-    go build -buildmode="$BUILDMODE" -ldflags="-s -w" -o "$OUT/libagw.${EXT}" ./archive
+    go build -buildmode="$BUILDMODE" -ldflags="-s -w -X=runtime.godebugDefault=${GODEBUG_VALUE}" -o "$OUT/libagw.${EXT}" ./archive
 
 ls -la "$OUT"

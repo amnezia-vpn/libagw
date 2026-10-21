@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -62,6 +63,13 @@ func (e *CancelledError) Unwrap() error { return e.Err }
 func cancelledError(ctx context.Context, tr *tracer, began time.Time) *CancelledError {
 	tr.add("cancelled after %s", time.Since(began).Round(100*time.Millisecond))
 	return &CancelledError{Err: ctx.Err(), Trace: tr.lines}
+}
+
+var errPostDeadline = errors.New("gateway: request deadline exceeded")
+
+func deadlineError(tr *tracer, began time.Time) *Error {
+	tr.add("deadline: gave up after %s", time.Since(began).Round(100*time.Millisecond))
+	return codeError(TimeoutError, tr)
 }
 
 func codeError(code ErrorCode, tr *tracer) *Error {

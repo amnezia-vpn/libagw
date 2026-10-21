@@ -10,7 +10,9 @@ import (
 	"context"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -38,8 +40,19 @@ type Config struct {
 	ProxyStorageTimeout time.Duration // storage GET, default 3s
 	ProxyHealthTimeout  time.Duration // proxy health GET, default 1s
 
-	// HTTPClient overrides the transport (custom TLS, uTLS, tests).
+	// The timeouts above cover connect, TLS and the answer; name resolution
+	// is bounded separately by DNSTimeout.
+	DNSTimeout time.Duration // one name lookup, default 10s
+	// TotalTimeout bounds a whole Post including failover, default 30s.
+	TotalTimeout time.Duration
+
+	// HTTPClient overrides the transport (custom TLS, uTLS, tests). With a
+	// host transport the shared DNS cache is not used.
 	HTTPClient Doer
+	// Resolver replaces the system resolver of the shared network stack.
+	// Clients with the same Resolver share one DNS cache. Ignored when
+	// HTTPClient is set.
+	Resolver Resolver
 	// OnBeforeRequest is invoked with the target host right before every
 	// network attempt (gateway, storage, health checks, proxies) so hosts
 	// can punch kill-switch exceptions. May be nil.
@@ -67,6 +80,7 @@ type Response struct {
 type Client struct {
 	cfg  Config
 	http Doer
+	net  *netstack
 
 	mu           sync.Mutex
 	workingProxy string
@@ -77,6 +91,10 @@ const (
 	defaultRequestTimeout      = 12 * time.Second
 	defaultProxyStorageTimeout = 3 * time.Second
 	defaultProxyHealthTimeout  = time.Second
+	defaultDNSTimeout          = 10 * time.Second
+	defaultTotalTimeout        = 30 * time.Second
+
+	maxParallelHealth = 8
 
 	healthPath = "lmbd-health"
 )
@@ -95,10 +113,18 @@ func New(cfg Config) *Client {
 	if cfg.ProxyHealthTimeout <= 0 {
 		cfg.ProxyHealthTimeout = defaultProxyHealthTimeout
 	}
-	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{}
+	if cfg.DNSTimeout <= 0 {
+		cfg.DNSTimeout = defaultDNSTimeout
 	}
-	return &Client{cfg: cfg, http: cfg.HTTPClient, proxyLists: map[string][]string{}}
+	if cfg.TotalTimeout <= 0 {
+		cfg.TotalTimeout = defaultTotalTimeout
+	}
+	c := &Client{cfg: cfg, http: cfg.HTTPClient, proxyLists: map[string][]string{}}
+	if c.http == nil {
+		c.net = stackFor(cfg.Resolver)
+		c.http = &http.Client{Transport: c.net.transport}
+	}
+	return c
 }
 
 // Post sends one encrypted request to the gateway. endpoint is a path
@@ -129,13 +155,17 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 		return Response{}, cancelledError(ctx, tr, began)
 	}
 
+	rctx, cancel := context.WithTimeoutCause(ctx, c.cfg.TotalTimeout, errPostDeadline)
+	defer cancel()
+
 	savedProxy := c.getWorkingProxy()
+	c.prefetch(savedProxy, opts)
 	var att attemptResult
 	accepted := false
 	if savedProxy != "" {
-		att, accepted = c.tracedAttempt(ctx, tr, "saved proxy", savedProxy, endpoint, env, c.cfg.ProxyRequestTimeout)
-		if ctx.Err() != nil {
-			return Response{}, cancelledError(ctx, tr, began)
+		att, accepted = c.tracedAttempt(rctx, tr, "saved proxy", savedProxy, endpoint, env, c.cfg.ProxyRequestTimeout)
+		if err := stopped(ctx, rctx, tr, began, accepted); err != nil {
+			return Response{}, err
 		}
 		if !accepted {
 			c.clearWorkingProxy(savedProxy)
@@ -143,15 +173,15 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 		}
 	}
 	if !accepted {
-		att, accepted = c.tracedAttempt(ctx, tr, "direct", c.cfg.GatewayEndpoint, endpoint, env, c.cfg.RequestTimeout)
-		if ctx.Err() != nil {
-			return Response{}, cancelledError(ctx, tr, began)
+		att, accepted = c.tracedAttempt(rctx, tr, "direct", c.cfg.GatewayEndpoint, endpoint, env, c.cfg.RequestTimeout)
+		if err := stopped(ctx, rctx, tr, began, accepted); err != nil {
+			return Response{}, err
 		}
 	}
 	if !accepted {
-		att = c.failover(ctx, tr, endpoint, env, opts, savedProxy, att)
-		if ctx.Err() != nil {
-			return Response{}, cancelledError(ctx, tr, began)
+		att, accepted = c.failover(rctx, tr, endpoint, env, opts, savedProxy, att)
+		if err := stopped(ctx, rctx, tr, began, accepted); err != nil {
+			return Response{}, err
 		}
 	}
 
@@ -159,6 +189,39 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 		return Response{}, codeError(code, tr)
 	}
 	return Response{Body: att.body, Trace: tr.lines}, nil
+}
+
+func stopped(ctx, rctx context.Context, tr *tracer, began time.Time, accepted bool) error {
+	switch {
+	case ctx.Err() != nil:
+		return cancelledError(ctx, tr, began)
+	case !accepted && rctx.Err() != nil:
+		return deadlineError(tr, began)
+	}
+	return nil
+}
+
+func (c *Client) prefetch(savedProxy string, opts PostOptions) {
+	if c.net == nil {
+		return
+	}
+	targets := []string{c.cfg.GatewayEndpoint, savedProxy}
+	targets = append(targets, c.cfg.S3PrimaryEndpoints...)
+	targets = append(targets, c.cfg.S3FallbackEndpoints...)
+	c.mu.Lock()
+	targets = append(targets, c.proxyLists[proxyListKey(opts.ServiceType, opts.UserCountryCode)]...)
+	c.mu.Unlock()
+
+	hosts := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if target == "" || usesEnvironmentProxy(target) {
+			continue
+		}
+		if u, err := url.Parse(target); err == nil && u.Hostname() != "" {
+			hosts = append(hosts, u.Hostname())
+		}
+	}
+	c.net.prefetch(hosts, c.cfg.DNSTimeout)
 }
 
 func transportErrorCode(a attemptResult) ErrorCode {
@@ -194,18 +257,25 @@ func (c *Client) tracedAttempt(ctx context.Context, tr *tracer, label, base, end
 	att := c.attempt(ctx, base, endpoint, env, timeout)
 	accepted := c.attemptAccepted(att)
 	if accepted {
-		tr.add("%s: %s, accepted", label, att.describe())
+		c.confirmAttempt(base, att)
+		tr.add("%s: %s, accepted%s", label, att.describe(), att.send.notes())
 	} else {
-		tr.add("%s: %s, suspicious", label, att.describe())
+		tr.add("%s: %s, suspicious%s", label, att.describe(), att.send.notes())
 	}
 	return att, accepted
+}
+
+func (c *Client) confirmAttempt(base string, a attemptResult) {
+	if a.decryptOK {
+		c.confirm(base, a.send)
+	}
 }
 
 func (c *Client) attemptAccepted(a attemptResult) bool {
 	return !a.send.ssl && !shouldBypassProxy(a.send.kind, a.body, a.decryptOK)
 }
 
-func (c *Client) failover(ctx context.Context, tr *tracer, endpoint string, env envelope, opts PostOptions, savedProxy string, last attemptResult) attemptResult {
+func (c *Client) failover(ctx context.Context, tr *tracer, endpoint string, env envelope, opts PostOptions, savedProxy string, last attemptResult) (attemptResult, bool) {
 	proxies := c.resolveProxyList(ctx, tr, opts)
 	if savedProxy != "" {
 		proxies = slices.DeleteFunc(proxies, func(p string) bool { return p == savedProxy })
@@ -213,39 +283,41 @@ func (c *Client) failover(ctx context.Context, tr *tracer, endpoint string, env 
 	rand.Shuffle(len(proxies), func(i, j int) { proxies[i], proxies[j] = proxies[j], proxies[i] })
 	if len(proxies) == 0 {
 		tr.add("failover: no proxies to try")
-		return last
+		return last, false
 	}
 
-	picked, pickedIndex := c.pickHealthyProxy(ctx, tr, proxies)
-	if picked != "" {
-		att := c.attempt(ctx, picked, endpoint, env, c.cfg.ProxyRequestTimeout)
+	picked, order := c.pickHealthyProxy(ctx, tr, proxies)
+	if picked >= 0 {
+		att := c.attempt(ctx, proxies[picked], endpoint, env, c.cfg.ProxyRequestTimeout)
 		if c.attemptAccepted(att) {
-			c.setWorkingProxy(picked)
-			tr.add("proxy %d/%d: %s, accepted", pickedIndex+1, len(proxies), att.describe())
-			return att
+			c.confirmAttempt(proxies[picked], att)
+			c.setWorkingProxy(proxies[picked])
+			tr.add("proxy %d/%d: %s, accepted%s", picked+1, len(proxies), att.describe(), att.send.notes())
+			return att, true
 		}
-		tr.add("proxy %d/%d: %s, rejected", pickedIndex+1, len(proxies), att.describe())
+		tr.add("proxy %d/%d: %s, rejected%s", picked+1, len(proxies), att.describe(), att.send.notes())
 		last = att
 	}
 
-	for i, proxy := range proxies {
+	for _, i := range order {
 		if ctx.Err() != nil {
-			return last
+			return last, false
 		}
-		if proxy == picked {
+		if i == picked {
 			continue
 		}
-		att := c.attempt(ctx, proxy, endpoint, env, c.cfg.ProxyRequestTimeout)
+		att := c.attempt(ctx, proxies[i], endpoint, env, c.cfg.ProxyRequestTimeout)
 		last = att
 		if c.attemptAccepted(att) {
-			c.setWorkingProxy(proxy)
-			tr.add("proxy %d/%d: %s, accepted", i+1, len(proxies), att.describe())
-			return att
+			c.confirmAttempt(proxies[i], att)
+			c.setWorkingProxy(proxies[i])
+			tr.add("proxy %d/%d: %s, accepted%s", i+1, len(proxies), att.describe(), att.send.notes())
+			return att, true
 		}
-		tr.add("proxy %d/%d: %s, rejected", i+1, len(proxies), att.describe())
+		tr.add("proxy %d/%d: %s, rejected%s", i+1, len(proxies), att.describe(), att.send.notes())
 	}
 	tr.add("failover: all %d proxies rejected", len(proxies))
-	return last
+	return last, false
 }
 
 func (c *Client) resolveProxyList(ctx context.Context, tr *tracer, opts PostOptions) []string {
@@ -262,15 +334,18 @@ func (c *Client) resolveProxyList(ctx context.Context, tr *tracer, opts PostOpti
 		}
 		sr := c.send(ctx, http.MethodGet, storageURL, nil, c.cfg.ProxyStorageTimeout, "")
 		if sr.kind != transportOK || sr.ssl || sr.status >= 300 {
-			tr.add("storage %d/%d: %s", i+1, len(storageURLs), sr.describe())
+			tr.add("storage %d/%d: %s%s", i+1, len(storageURLs), sr.describe(), sr.notes())
 			continue
 		}
 		list, err := decodeProxyList(sr.body, c.cfg.IsDevEnvironment, c.cfg.PublicKeyPEM)
 		if err != nil {
-			tr.add("storage %d/%d: %s, undecodable list", i+1, len(storageURLs), sr.describe())
+			tr.add("storage %d/%d: %s, undecodable list%s", i+1, len(storageURLs), sr.describe(), sr.notes())
 			continue
 		}
-		tr.add("storage %d/%d: %s, %d proxies", i+1, len(storageURLs), sr.describe(), len(list))
+		tr.add("storage %d/%d: %s, %d proxies%s", i+1, len(storageURLs), sr.describe(), len(list), sr.notes())
+		if strings.HasPrefix(storageURL, "https://") {
+			c.confirm(storageURL, sr)
+		}
 		c.mu.Lock()
 		c.proxyLists[key] = append([]string(nil), list...)
 		c.mu.Unlock()
@@ -284,19 +359,60 @@ func (c *Client) resolveProxyList(ctx context.Context, tr *tracer, opts PostOpti
 	return cached
 }
 
-func (c *Client) pickHealthyProxy(ctx context.Context, tr *tracer, proxies []string) (string, int) {
-	for i, proxy := range proxies {
-		if ctx.Err() != nil {
-			return "", -1
-		}
-		sr := c.send(ctx, http.MethodGet, joinURL(proxy, healthPath), nil, c.cfg.ProxyHealthTimeout, "")
-		if sr.kind == transportOK && !sr.ssl && sr.status < 400 {
-			tr.add("health %d/%d: ok", i+1, len(proxies))
-			return proxy, i
-		}
-		tr.add("health %d/%d: %s", i+1, len(proxies), sr.describe())
+func (c *Client) pickHealthyProxy(ctx context.Context, tr *tracer, proxies []string) (int, []int) {
+	hctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type check struct {
+		index int
+		ran   bool
+		sr    sendResult
 	}
-	return "", -1
+	checks := make(chan check, len(proxies))
+	slots := make(chan struct{}, maxParallelHealth)
+	for i, proxy := range proxies {
+		go func() {
+			select {
+			case slots <- struct{}{}:
+			case <-hctx.Done():
+				checks <- check{index: i}
+				return
+			}
+			defer func() { <-slots }()
+			if hctx.Err() != nil {
+				checks <- check{index: i}
+				return
+			}
+			checks <- check{index: i, ran: true, sr: c.send(hctx, http.MethodGet, joinURL(proxy, healthPath), nil, c.cfg.ProxyHealthTimeout, "")}
+		}()
+	}
+
+	healthy := func(sr sendResult) bool { return sr.kind == transportOK && !sr.ssl && sr.status < 400 }
+	results := make([]check, len(proxies))
+	picked := -1
+	for range proxies {
+		r := <-checks
+		results[r.index] = r
+		if picked < 0 && r.ran && healthy(r.sr) {
+			picked = r.index
+			cancel()
+		}
+	}
+
+	var good, unchecked, failed []int
+	for i, r := range results {
+		switch {
+		case r.ran && healthy(r.sr):
+			tr.add("health %d/%d: ok%s", i+1, len(proxies), r.sr.notes())
+			good = append(good, i)
+		case !r.ran || (r.sr.kind == transportCancelled && picked >= 0 && ctx.Err() == nil):
+			unchecked = append(unchecked, i)
+		default:
+			tr.add("health %d/%d: %s%s", i+1, len(proxies), r.sr.describe(), r.sr.notes())
+			failed = append(failed, i)
+		}
+	}
+	return picked, slices.Concat(good, unchecked, failed)
 }
 
 func (c *Client) getWorkingProxy() string {

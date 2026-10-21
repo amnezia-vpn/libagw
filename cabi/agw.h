@@ -37,10 +37,14 @@ uint32_t agw_abi_version(void);
  *   "request_timeout_msecs": 12000,         gateway POST
  *   "proxy_request_timeout_msecs": 12000,   POST through a proxy, defaults to request_timeout_msecs
  *   "proxy_storage_timeout_msecs": 3000,    proxy-list storage GET
- *   "proxy_health_timeout_msecs": 1000      proxy health GET
+ *   "proxy_health_timeout_msecs": 1000,     proxy health GET
+ *   "dns_timeout_msecs": 10000,             one name lookup
+ *   "total_timeout_msecs": 30000            the whole agw_post, failover included
  * }
- * Every timeout bounds one network attempt; a missing or non-positive value
- * takes the default.
+ * The attempt timeouts bound connect, TLS and the answer of one attempt; name
+ * resolution is not part of them and is bounded by dns_timeout_msecs. Lookups
+ * are cached process-wide and shared by all clients. A missing or
+ * non-positive value takes the default.
  * callbacks may be NULL. Returns 0 on invalid input. */
 agw_client_handle agw_client_create(const char *config_json, const agw_callbacks *callbacks);
 /* Destroying a handle twice, or passing a handle of the other kind, is a no-op;
@@ -64,9 +68,12 @@ agw_cancel_handle agw_cancel_create(void);
 void agw_cancel_cancel(agw_cancel_handle cancel);
 void agw_cancel_destroy(agw_cancel_handle cancel);
 
-/* Failover caches (working proxy + proxy lists) as an opaque JSON blob. The
- * blob contains censorship-bypass endpoints — persist it in protected
- * storage. Returns NULL on invalid handle; free with agw_string_free.
+/* Failover caches (working proxy, proxy lists and the last known IP addresses
+ * of the gateway, storages and proxies) as an opaque JSON blob. The blob
+ * contains censorship-bypass endpoints and their addresses — persist it in
+ * protected storage. Addresses are shared by all clients of the process, so
+ * importing into one client makes them available to all. The blob only
+ * changes when its content does, at most once a day for the same addresses. Returns NULL on invalid handle; free with agw_string_free.
  * agw_import_state returns AGW_OK or AGW_ERR_INVALID_ARGUMENT. */
 char *agw_export_state(agw_client_handle client);
 int32_t agw_import_state(agw_client_handle client, const char *state_json);
