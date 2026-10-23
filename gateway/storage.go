@@ -3,6 +3,8 @@ package gateway
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/url"
+	"strings"
 )
 
 // The token encoding — unpadded base64url of "endpoints-<service>-<country>" —
@@ -51,6 +53,23 @@ func decodeProxyList(body []byte, isDev bool, publicKeyPEM []byte) ([]string, er
 		}
 	}
 	return urls, nil
+}
+
+// storageKind names the storage provider for the trace without the bucket or
+// the host.
+func storageKind(storageURL string) string {
+	u, err := url.Parse(storageURL)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	switch {
+	case host == "amazonaws.com" || strings.HasSuffix(host, ".amazonaws.com"):
+		return " (s3)"
+	case host == "googleapis.com" || strings.HasSuffix(host, ".googleapis.com"):
+		return " (gcs)"
+	}
+	return ""
 }
 
 func proxyListKey(serviceType, userCountryCode string) string {

@@ -8,13 +8,20 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 // Doer abstracts the HTTP transport so hosts can inject their own client
@@ -40,11 +47,93 @@ type sendResult struct {
 	body    []byte // raw, still encrypted
 	phase   string
 	elapsed time.Duration
+	dnsWait time.Duration
+	remote netip.Addr
+	lastKnown bool
+	candidates []netip.Addr // addresses offered to the dialer when no connection was made
 }
+
+func (sr sendResult) notes() string {
+	var out string
+	if sr.phase != phaseDNS && sr.dnsWait >= 100*time.Millisecond {
+		out = fmt.Sprintf("; dns %s", sr.dnsWait.Round(100*time.Millisecond))
+	}
+	if sr.lastKnown {
+		out += "; last known address"
+	}
+	if sr.kind == transportConnError && !sr.ssl && sr.phase != phaseDNS {
+		out += fmt.Sprintf("; after %s", sr.elapsed.Round(100*time.Millisecond))
+	}
+	if family := sr.family(); family != "" {
+		out += "; " + family
+	}
+	return out
+}
+
+func (sr sendResult) family() string {
+	addrs := sr.candidates
+	if sr.remote.IsValid() {
+		addrs = []netip.Addr{sr.remote}
+	}
+	var v4, v6 bool
+	for _, a := range addrs {
+		if a.Unmap().Is4() {
+			v4 = true
+		} else {
+			v6 = true
+		}
+	}
+	switch {
+	case v4 && v6:
+		return "ipv4+ipv6"
+	case v4:
+		return "ipv4"
+	case v6:
+		return "ipv6"
+	}
+	return ""
+}
+
+func (sr sendResult) addressNote() string {
+	switch {
+	case sr.remote.IsValid():
+		return "; address " + sr.remote.String()
+	case len(sr.candidates) > 0:
+		addrs := make([]string, len(sr.candidates))
+		for i, a := range sr.candidates {
+			addrs[i] = a.String()
+		}
+		return "; candidates " + strings.Join(addrs, ", ")
+	}
+	return ""
+}
+
+const phaseDNS = "dns lookup"
 
 var phaseNames = []string{"tcp connect", "dns lookup", "tcp connect", "tls handshake", "waiting for response", "reading response"}
 
-type phaseTracker struct{ current atomic.Int32 }
+type phaseTracker struct {
+	current atomic.Int32
+
+	mu     sync.Mutex
+	remote netip.Addr
+}
+
+func (p *phaseTracker) gotConn(info httptrace.GotConnInfo) {
+	if info.Conn == nil {
+		return
+	}
+	addr := connAddr(info.Conn)
+	p.mu.Lock()
+	p.remote = addr
+	p.mu.Unlock()
+}
+
+func (p *phaseTracker) remoteAddr() netip.Addr {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.remote
+}
 
 func (p *phaseTracker) set(i int32) { p.current.Store(i) }
 
@@ -58,9 +147,14 @@ func (p *phaseTracker) clientTrace() *httptrace.ClientTrace {
 				p.set(2)
 			}
 		},
-		ConnectStart:         func(string, string) { p.set(2) },
-		TLSHandshakeStart:    func() { p.set(3) },
-		TLSHandshakeDone:     func(tls.ConnectionState, error) { p.set(4) },
+		ConnectStart:      func(string, string) { p.set(2) },
+		GotConn:           p.gotConn,
+		TLSHandshakeStart: func() { p.set(3) },
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			if err == nil {
+				p.set(4)
+			}
+		},
 		WroteRequest:         func(httptrace.WroteRequestInfo) { p.set(4) },
 		GotFirstResponseByte: func() { p.set(5) },
 	}
@@ -75,12 +169,19 @@ func (c *Client) send(ctx context.Context, method, target string, body []byte, t
 		}
 	}
 
+	dnsWait, failed := c.resolveTarget(ctx, target)
+	if failed != nil {
+		return *failed
+	}
+
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	var phase phaseTracker
+	rec := &dialRecord{}
 	started := time.Now()
-	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(tctx, phase.clientTrace()), method, target, bytes.NewReader(body))
+	rctx := context.WithValue(httptrace.WithClientTrace(tctx, phase.clientTrace()), dialRecordKey{}, rec)
+	req, err := http.NewRequestWithContext(rctx, method, target, bytes.NewReader(body))
 	if err != nil {
 		return sendResult{kind: transportConnError, err: err}
 	}
@@ -91,17 +192,99 @@ func (c *Client) send(ctx context.Context, method, target string, body []byte, t
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return sendResult{kind: classifyTransportError(ctx, err), ssl: isTLSError(err), err: err, phase: phase.name(), elapsed: time.Since(started)}
+		out := sendResult{kind: classifyTransportError(ctx, err), ssl: isTLSError(err), err: err, phase: phase.name(), elapsed: time.Since(started), dnsWait: dnsWait}
+		c.noteRemote(target, &out, rec.get())
+		if !out.remote.IsValid() {
+			out.candidates = rec.candidates()
+		}
+		return out
 	}
 	defer resp.Body.Close()
 
 	data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
-	out := sendResult{status: resp.StatusCode, body: data, phase: phase.name(), elapsed: time.Since(started)}
+	out := sendResult{status: resp.StatusCode, body: data, phase: phase.name(), elapsed: time.Since(started), dnsWait: dnsWait}
 	if readErr != nil {
 		out.kind = classifyTransportError(ctx, readErr)
 		out.err = readErr
 	}
+	remote := phase.remoteAddr()
+	if !remote.IsValid() {
+		remote = rec.get()
+	}
+	c.noteRemote(target, &out, remote)
 	return out
+}
+
+func (c *Client) noteRemote(target string, sr *sendResult, remote netip.Addr) {
+	host := c.lastKnownHost(target)
+	if host == "" || !remote.IsValid() {
+		return
+	}
+	sr.remote = remote
+	sr.lastKnown = c.net.isLastKnownOnly(host, remote)
+	if sr.ssl && slices.Contains(c.net.lastKnown(host), remote) {
+		c.net.forget(host, remote)
+	}
+}
+
+func (c *Client) confirm(target string, sr sendResult) {
+	if host := c.lastKnownHost(target); host != "" {
+		c.net.remember(host, sr.remote)
+	}
+}
+
+func (c *Client) lastKnownHost(target string) string {
+	if c.net == nil || usesEnvironmentProxy(target) {
+		return ""
+	}
+	u, err := url.Parse(target)
+	if err != nil || isIPLiteral(u.Hostname()) {
+		return ""
+	}
+	return u.Hostname()
+}
+
+func (c *Client) resolveTarget(ctx context.Context, target string) (time.Duration, *sendResult) {
+	if c.net == nil {
+		return 0, nil
+	}
+	u, err := url.Parse(target)
+	if err != nil {
+		return 0, nil
+	}
+	host := u.Hostname()
+	if host == "" || isIPLiteral(host) || usesEnvironmentProxy(target) {
+		return 0, nil
+	}
+
+	budget := c.cfg.DNSTimeout
+	fallback := len(c.net.lastKnown(host)) > 0
+	if fallback {
+		budget = min(budget, lkgDNSWait)
+	}
+	started := time.Now()
+	rctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	_, err = c.net.resolve(rctx, host, c.cfg.DNSTimeout)
+	waited := time.Since(started)
+	if err == nil || (fallback && ctx.Err() == nil) {
+		return waited, nil
+	}
+
+	out := sendResult{err: err, phase: phaseDNS, elapsed: waited, dnsWait: waited}
+	var dnsErr *net.DNSError
+	switch {
+	case ctx.Err() != nil:
+		out.kind = classifyTransportError(ctx, ctx.Err())
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &dnsErr) && dnsErr.IsTimeout:
+		out.kind = transportTimeout
+	default:
+		out.kind = transportConnError
+		if !errors.As(err, &dnsErr) {
+			out.err = &net.DNSError{Err: err.Error(), Name: host}
+		}
+	}
+	return waited, &out
 }
 
 func usesEnvironmentProxy(target string) bool {
@@ -135,10 +318,12 @@ func isTLSError(err error) bool {
 		unknownAuth x509.UnknownAuthorityError
 		hostnameErr x509.HostnameError
 		invalidCert x509.CertificateInvalidError
+		uVerifyErr  *utls.CertificateVerificationError
+		uRecordErr  utls.RecordHeaderError
 	)
 	return errors.As(err, &verifyErr) || errors.As(err, &recordErr) ||
 		errors.As(err, &unknownAuth) || errors.As(err, &hostnameErr) ||
-		errors.As(err, &invalidCert)
+		errors.As(err, &invalidCert) || errors.As(err, &uVerifyErr) || errors.As(err, &uRecordErr)
 }
 
 func newRequestID() string {

@@ -9,13 +9,19 @@ type persistedState struct {
 	Version      int                 `json:"version"`
 	WorkingProxy string              `json:"working_proxy,omitempty"`
 	ProxyLists   map[string][]string `json:"proxy_lists,omitempty"`
+	Hosts map[string]persistedHost   `json:"hosts,omitempty"`
 }
 
 const stateVersion = 1
 
 // ExportState snapshots the failover caches. The blob lists censorship-bypass
-// endpoints, so hosts must keep it in protected storage.
+// endpoints and their IP addresses, so hosts must keep it in protected
+// storage.
 func (c *Client) ExportState() []byte {
+	var hosts map[string]persistedHost
+	if c.net != nil {
+		hosts = c.net.exportHosts()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	lists := make(map[string][]string, len(c.proxyLists))
@@ -26,6 +32,7 @@ func (c *Client) ExportState() []byte {
 		Version:      stateVersion,
 		WorkingProxy: c.workingProxy,
 		ProxyLists:   lists,
+		Hosts:        hosts,
 	})
 	return out
 }
@@ -38,6 +45,9 @@ func (c *Client) ImportState(data []byte) error {
 	}
 	if st.Version != stateVersion {
 		return fmt.Errorf("unsupported state version %d", st.Version)
+	}
+	if c.net != nil {
+		c.net.importHosts(st.Hosts)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
