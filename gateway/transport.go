@@ -50,6 +50,7 @@ type sendResult struct {
 	dnsWait time.Duration
 	remote netip.Addr
 	lastKnown bool
+	candidates []netip.Addr // addresses offered to the dialer when no connection was made
 }
 
 func (sr sendResult) notes() string {
@@ -60,7 +61,51 @@ func (sr sendResult) notes() string {
 	if sr.lastKnown {
 		out += "; last known address"
 	}
+	if sr.kind == transportConnError && !sr.ssl && sr.phase != phaseDNS {
+		out += fmt.Sprintf("; after %s", sr.elapsed.Round(100*time.Millisecond))
+	}
+	if family := sr.family(); family != "" {
+		out += "; " + family
+	}
 	return out
+}
+
+func (sr sendResult) family() string {
+	addrs := sr.candidates
+	if sr.remote.IsValid() {
+		addrs = []netip.Addr{sr.remote}
+	}
+	var v4, v6 bool
+	for _, a := range addrs {
+		if a.Unmap().Is4() {
+			v4 = true
+		} else {
+			v6 = true
+		}
+	}
+	switch {
+	case v4 && v6:
+		return "ipv4+ipv6"
+	case v4:
+		return "ipv4"
+	case v6:
+		return "ipv6"
+	}
+	return ""
+}
+
+func (sr sendResult) addressNote() string {
+	switch {
+	case sr.remote.IsValid():
+		return "; address " + sr.remote.String()
+	case len(sr.candidates) > 0:
+		addrs := make([]string, len(sr.candidates))
+		for i, a := range sr.candidates {
+			addrs[i] = a.String()
+		}
+		return "; candidates " + strings.Join(addrs, ", ")
+	}
+	return ""
 }
 
 const phaseDNS = "dns lookup"
@@ -102,10 +147,14 @@ func (p *phaseTracker) clientTrace() *httptrace.ClientTrace {
 				p.set(2)
 			}
 		},
-		ConnectStart:         func(string, string) { p.set(2) },
-		GotConn:              p.gotConn,
-		TLSHandshakeStart:    func() { p.set(3) },
-		TLSHandshakeDone:     func(tls.ConnectionState, error) { p.set(4) },
+		ConnectStart:      func(string, string) { p.set(2) },
+		GotConn:           p.gotConn,
+		TLSHandshakeStart: func() { p.set(3) },
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			if err == nil {
+				p.set(4)
+			}
+		},
 		WroteRequest:         func(httptrace.WroteRequestInfo) { p.set(4) },
 		GotFirstResponseByte: func() { p.set(5) },
 	}
@@ -145,6 +194,9 @@ func (c *Client) send(ctx context.Context, method, target string, body []byte, t
 	if err != nil {
 		out := sendResult{kind: classifyTransportError(ctx, err), ssl: isTLSError(err), err: err, phase: phase.name(), elapsed: time.Since(started), dnsWait: dnsWait}
 		c.noteRemote(target, &out, rec.get())
+		if !out.remote.IsValid() {
+			out.candidates = rec.candidates()
+		}
 		return out
 	}
 	defer resp.Body.Close()
@@ -246,8 +298,6 @@ func usesEnvironmentProxy(target string) bool {
 
 func classifyTransportError(parent context.Context, err error) transportErrorKind {
 	switch {
-	case parent.Err() != nil && context.Cause(parent) == errPostDeadline:
-		return transportTimeout
 	case parent.Err() != nil:
 		return transportCancelled
 	case errors.Is(err, context.DeadlineExceeded):

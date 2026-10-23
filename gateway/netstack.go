@@ -392,8 +392,9 @@ func (s *netstack) importHosts(hosts map[string]persistedHost) {
 }
 
 type dialRecord struct {
-	mu   sync.Mutex
-	addr netip.Addr
+	mu    sync.Mutex
+	addr  netip.Addr
+	addrs []netip.Addr
 }
 
 type dialRecordKey struct{}
@@ -408,6 +409,18 @@ func (r *dialRecord) get() netip.Addr {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.addr
+}
+
+func (r *dialRecord) setCandidates(addrs []netip.Addr) {
+	r.mu.Lock()
+	r.addrs = slices.Clone(addrs)
+	r.mu.Unlock()
+}
+
+func (r *dialRecord) candidates() []netip.Addr {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.addrs)
 }
 
 func connAddr(c net.Conn) netip.Addr {
@@ -464,8 +477,12 @@ func (s *netstack) dialContext(ctx context.Context, network, address string) (ne
 	if len(addrs) == 0 {
 		return nil, &net.DNSError{Err: "no suitable address", Name: host}
 	}
+	rec, _ := ctx.Value(dialRecordKey{}).(*dialRecord)
+	if rec != nil {
+		rec.setCandidates(addrs)
+	}
 	conn, err := raceDial(ctx, dialer, network, addrs, port)
-	if rec, ok := ctx.Value(dialRecordKey{}).(*dialRecord); ok && err == nil {
+	if rec != nil && err == nil {
 		rec.set(connAddr(conn))
 	}
 	return conn, err

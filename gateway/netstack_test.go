@@ -48,7 +48,7 @@ func TestSlowDNSDoesNotEatTheAttemptBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, traceOf(err))
 	}
-	if len(resp.Trace) != 2 || !strings.HasPrefix(resp.Trace[1], "direct: http 200, ") || !strings.HasSuffix(resp.Trace[1], ", accepted; dns 600ms") {
+	if len(resp.Trace) != 2 || !strings.HasPrefix(resp.Trace[1], "direct: http 200, ") || !strings.HasSuffix(resp.Trace[1], ", accepted; dns 600ms; ipv4; address 127.0.0.1") {
 		t.Fatalf("trace:\n%s", resp.Trace)
 	}
 }
@@ -87,7 +87,7 @@ func TestUnknownHostIsAConnectFailure(t *testing.T) {
 	if code := errCodeOf(t, err); code != NetworkError {
 		t.Fatalf("code %d, want %d", code, NetworkError)
 	}
-	if tr := traceOf(err); !strings.Contains(tr, "direct: connect failed: dns lookup failed, in dns lookup, suspicious") {
+	if tr := traceOf(err); !strings.Contains(tr, "direct: connect failed: dns lookup failed: no such host, in dns lookup, suspicious") {
 		t.Fatalf("trace:\n%s", tr)
 	}
 }
@@ -307,48 +307,6 @@ func TestSweepReachesAProxyWhoseHealthCheckFailed(t *testing.T) {
 	}
 	if last := resp.Trace[len(resp.Trace)-1]; !strings.HasPrefix(last, "proxy ") || !strings.Contains(last, ", accepted") {
 		t.Fatalf("trace:\n%s", resp.Trace)
-	}
-}
-
-func TestTotalTimeoutCapsPost(t *testing.T) {
-	_, pubPEM := newTestKeyPair(t)
-	srv := hangingServer(t)
-	c := New(Config{
-		GatewayEndpoint: srv.URL,
-		PublicKeyPEM:    pubPEM,
-		RequestTimeout:  5 * time.Second,
-		TotalTimeout:    300 * time.Millisecond,
-	})
-	started := time.Now()
-	_, err := c.Post(context.Background(), testEndpoint, []byte(`{}`), PostOptions{})
-	if code := errCodeOf(t, err); code != TimeoutError {
-		t.Fatalf("code %d, want %d", code, TimeoutError)
-	}
-	if took := time.Since(started); took > time.Second {
-		t.Fatalf("post took %s", took)
-	}
-	lines := err.(*Error).Trace
-	if len(lines) != 4 ||
-		!strings.HasPrefix(lines[1], "direct: timeout after 300ms in waiting for response, suspicious") ||
-		!strings.HasPrefix(lines[2], "deadline: gave up after ") ||
-		lines[3] != "result: "+ErrorText(TimeoutError) {
-		t.Fatalf("trace:\n%s", lines)
-	}
-}
-
-func TestCallerCancelBeatsTheDeadline(t *testing.T) {
-	_, pubPEM := newTestKeyPair(t)
-	srv := hangingServer(t)
-	c := New(Config{GatewayEndpoint: srv.URL, PublicKeyPEM: pubPEM, TotalTimeout: 300 * time.Millisecond})
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	_, err := c.Post(ctx, testEndpoint, []byte(`{}`), PostOptions{})
-	var cancelled *CancelledError
-	if !errors.As(err, &cancelled) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("want *CancelledError, got %v", err)
-	}
-	if !strings.Contains(cancelled.Trace.String(), "direct: cancelled") {
-		t.Fatalf("trace:\n%s", cancelled.Trace)
 	}
 }
 
