@@ -20,6 +20,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 )
 
 // Doer abstracts the HTTP transport so hosts can inject their own client
@@ -266,10 +268,12 @@ func isTLSError(err error) bool {
 		unknownAuth x509.UnknownAuthorityError
 		hostnameErr x509.HostnameError
 		invalidCert x509.CertificateInvalidError
+		uVerifyErr  *utls.CertificateVerificationError
+		uRecordErr  utls.RecordHeaderError
 	)
 	return errors.As(err, &verifyErr) || errors.As(err, &recordErr) ||
 		errors.As(err, &unknownAuth) || errors.As(err, &hostnameErr) ||
-		errors.As(err, &invalidCert)
+		errors.As(err, &invalidCert) || errors.As(err, &uVerifyErr) || errors.As(err, &uRecordErr)
 }
 
 func newRequestID() string {

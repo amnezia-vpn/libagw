@@ -75,6 +75,7 @@ func stackFor(res Resolver) *netstack {
 	s := &netstack{res: res, dns: map[string]*dnsEntry{}, lkg: map[string]*lkgEntry{}}
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.DialContext = s.dialContext
+	tr.DialTLSContext = chromeTLSDialer(s.dialContext, transportRoots(tr))
 	s.transport = tr
 	stacks[res] = s
 	return s
