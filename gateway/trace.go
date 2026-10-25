@@ -11,8 +11,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	utls "github.com/refraction-networking/utls"
 )
 
 type Trace []string
@@ -87,39 +85,22 @@ func connReason(err error) string {
 	var (
 		dnsErr *net.DNSError
 		alert  tls.AlertError
-		uAlert utls.AlertError
 	)
 	switch {
 	case err == nil:
 		return "unknown"
 	case errors.As(err, &dnsErr):
-		return "dns lookup failed: " + dnsReason(dnsErr)
+		return "dns lookup failed"
 	case errors.Is(err, syscall.ECONNREFUSED):
 		return "connection refused"
 	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE):
 		return "connection reset"
 	case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH), errors.Is(err, syscall.ENETDOWN):
 		return "network unreachable"
-	case errors.As(err, &alert), errors.As(err, &uAlert):
+	case errors.As(err, &alert):
 		return "tls alert"
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 		return "connection closed"
-	}
-	return "other"
-}
-
-// dnsReason keeps the resolver's own text out of the trace: it may carry the
-// DNS server address.
-func dnsReason(err *net.DNSError) string {
-	switch {
-	case err.IsNotFound:
-		return "no such host"
-	case err.IsTimeout:
-		return "timeout"
-	case err.Err == "no suitable address":
-		return "no suitable address"
-	case err.IsTemporary:
-		return "temporary failure"
 	}
 	return "other"
 }

@@ -47,6 +47,7 @@ type abiConfig struct {
 	ProxyStorageTimeoutMsecs int      `json:"proxy_storage_timeout_msecs"`
 	ProxyHealthTimeoutMsecs  int      `json:"proxy_health_timeout_msecs"`
 	DNSTimeoutMsecs          int      `json:"dns_timeout_msecs"`
+	TotalTimeoutMsecs        int      `json:"total_timeout_msecs"`
 }
 
 type abiOptions struct {
@@ -127,6 +128,7 @@ func agw_client_create(configJSON *C.char, callbacks *C.agw_callbacks) C.agw_cli
 		ProxyStorageTimeout: time.Duration(cfg.ProxyStorageTimeoutMsecs) * time.Millisecond,
 		ProxyHealthTimeout:  time.Duration(cfg.ProxyHealthTimeoutMsecs) * time.Millisecond,
 		DNSTimeout:          time.Duration(cfg.DNSTimeoutMsecs) * time.Millisecond,
+		TotalTimeout:        time.Duration(cfg.TotalTimeoutMsecs) * time.Millisecond,
 	}
 
 	// Snapshotted: the caller may free the struct after this returns.

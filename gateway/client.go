@@ -43,6 +43,8 @@ type Config struct {
 	// The timeouts above cover connect, TLS and the answer; name resolution
 	// is bounded separately by DNSTimeout.
 	DNSTimeout time.Duration // one name lookup, default 10s
+	// TotalTimeout bounds a whole Post including failover, default 30s.
+	TotalTimeout time.Duration
 
 	// HTTPClient overrides the transport (custom TLS, uTLS, tests). With a
 	// host transport the shared DNS cache is not used.
@@ -90,6 +92,7 @@ const (
 	defaultProxyStorageTimeout = 3 * time.Second
 	defaultProxyHealthTimeout  = time.Second
 	defaultDNSTimeout          = 10 * time.Second
+	defaultTotalTimeout        = 30 * time.Second
 
 	maxParallelHealth = 8
 
@@ -112,6 +115,9 @@ func New(cfg Config) *Client {
 	}
 	if cfg.DNSTimeout <= 0 {
 		cfg.DNSTimeout = defaultDNSTimeout
+	}
+	if cfg.TotalTimeout <= 0 {
+		cfg.TotalTimeout = defaultTotalTimeout
 	}
 	c := &Client{cfg: cfg, http: cfg.HTTPClient, proxyLists: map[string][]string{}}
 	if c.http == nil {
@@ -149,14 +155,17 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 		return Response{}, cancelledError(ctx, tr, began)
 	}
 
+	rctx, cancel := context.WithTimeoutCause(ctx, c.cfg.TotalTimeout, errPostDeadline)
+	defer cancel()
+
 	savedProxy := c.getWorkingProxy()
 	c.prefetch(savedProxy, opts)
 	var att attemptResult
 	accepted := false
 	if savedProxy != "" {
-		att, accepted = c.tracedAttempt(ctx, tr, "saved proxy", savedProxy, endpoint, env, c.cfg.ProxyRequestTimeout)
-		if ctx.Err() != nil {
-			return Response{}, cancelledError(ctx, tr, began)
+		att, accepted = c.tracedAttempt(rctx, tr, "saved proxy", savedProxy, endpoint, env, c.cfg.ProxyRequestTimeout)
+		if err := stopped(ctx, rctx, tr, began, accepted); err != nil {
+			return Response{}, err
 		}
 		if !accepted {
 			c.clearWorkingProxy(savedProxy)
@@ -164,15 +173,15 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 		}
 	}
 	if !accepted {
-		att, accepted = c.tracedAttempt(ctx, tr, "direct", c.cfg.GatewayEndpoint, endpoint, env, c.cfg.RequestTimeout)
-		if ctx.Err() != nil {
-			return Response{}, cancelledError(ctx, tr, began)
+		att, accepted = c.tracedAttempt(rctx, tr, "direct", c.cfg.GatewayEndpoint, endpoint, env, c.cfg.RequestTimeout)
+		if err := stopped(ctx, rctx, tr, began, accepted); err != nil {
+			return Response{}, err
 		}
 	}
 	if !accepted {
-		att, _ = c.failover(ctx, tr, endpoint, env, opts, savedProxy, att)
-		if ctx.Err() != nil {
-			return Response{}, cancelledError(ctx, tr, began)
+		att, accepted = c.failover(rctx, tr, endpoint, env, opts, savedProxy, att)
+		if err := stopped(ctx, rctx, tr, began, accepted); err != nil {
+			return Response{}, err
 		}
 	}
 
@@ -180,6 +189,16 @@ func (c *Client) Post(ctx context.Context, endpoint string, payload []byte, opts
 		return Response{}, codeError(code, tr)
 	}
 	return Response{Body: att.body, Trace: tr.lines}, nil
+}
+
+func stopped(ctx, rctx context.Context, tr *tracer, began time.Time, accepted bool) error {
+	switch {
+	case ctx.Err() != nil:
+		return cancelledError(ctx, tr, began)
+	case !accepted && rctx.Err() != nil:
+		return deadlineError(tr, began)
+	}
+	return nil
 }
 
 func (c *Client) prefetch(savedProxy string, opts PostOptions) {
@@ -237,17 +256,11 @@ func (c *Client) attempt(ctx context.Context, base, endpoint string, env envelop
 func (c *Client) tracedAttempt(ctx context.Context, tr *tracer, label, base, endpoint string, env envelope, timeout time.Duration) (attemptResult, bool) {
 	att := c.attempt(ctx, base, endpoint, env, timeout)
 	accepted := c.attemptAccepted(att)
-	notes := att.send.notes()
-	// Only the gateway address is logged: a foreign one points at DNS
-	// poisoning. Storage and proxy addresses stay out of the trace.
-	if label == "direct" {
-		notes += att.send.addressNote()
-	}
 	if accepted {
 		c.confirmAttempt(base, att)
-		tr.add("%s: %s, accepted%s", label, att.describe(), notes)
+		tr.add("%s: %s, accepted%s", label, att.describe(), att.send.notes())
 	} else {
-		tr.add("%s: %s, suspicious%s", label, att.describe(), notes)
+		tr.add("%s: %s, suspicious%s", label, att.describe(), att.send.notes())
 	}
 	return att, accepted
 }
@@ -320,17 +333,16 @@ func (c *Client) resolveProxyList(ctx context.Context, tr *tracer, opts PostOpti
 			return nil
 		}
 		sr := c.send(ctx, http.MethodGet, storageURL, nil, c.cfg.ProxyStorageTimeout, "")
-		kind := storageKind(storageURL)
 		if sr.kind != transportOK || sr.ssl || sr.status >= 300 {
-			tr.add("storage %d/%d%s: %s%s", i+1, len(storageURLs), kind, sr.describe(), sr.notes())
+			tr.add("storage %d/%d: %s%s", i+1, len(storageURLs), sr.describe(), sr.notes())
 			continue
 		}
 		list, err := decodeProxyList(sr.body, c.cfg.IsDevEnvironment, c.cfg.PublicKeyPEM)
 		if err != nil {
-			tr.add("storage %d/%d%s: %s, undecodable list%s", i+1, len(storageURLs), kind, sr.describe(), sr.notes())
+			tr.add("storage %d/%d: %s, undecodable list%s", i+1, len(storageURLs), sr.describe(), sr.notes())
 			continue
 		}
-		tr.add("storage %d/%d%s: %s, %d proxies%s", i+1, len(storageURLs), kind, sr.describe(), len(list), sr.notes())
+		tr.add("storage %d/%d: %s, %d proxies%s", i+1, len(storageURLs), sr.describe(), len(list), sr.notes())
 		if strings.HasPrefix(storageURL, "https://") {
 			c.confirm(storageURL, sr)
 		}

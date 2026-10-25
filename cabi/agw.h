@@ -38,7 +38,8 @@ uint32_t agw_abi_version(void);
  *   "proxy_request_timeout_msecs": 12000,   POST through a proxy, defaults to request_timeout_msecs
  *   "proxy_storage_timeout_msecs": 3000,    proxy-list storage GET
  *   "proxy_health_timeout_msecs": 1000,     proxy health GET
- *   "dns_timeout_msecs": 10000              one name lookup
+ *   "dns_timeout_msecs": 10000,             one name lookup
+ *   "total_timeout_msecs": 30000            the whole agw_post, failover included
  * }
  * The attempt timeouts bound connect, TLS and the answer of one attempt; name
  * resolution is not part of them and is bounded by dns_timeout_msecs. Lookups

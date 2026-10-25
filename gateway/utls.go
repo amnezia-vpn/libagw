@@ -2,11 +2,9 @@ package gateway
 
 import (
 	"context"
-	"crypto/tls"
 	"crypto/x509"
 	"net"
 	"net/http"
-	"net/http/httptrace"
 	"time"
 
 	utls "github.com/refraction-networking/utls"
@@ -43,17 +41,7 @@ func chromeTLSDialer(dial dialFunc, roots func() *x509.CertPool) dialFunc {
 			raw.Close()
 			return nil, err
 		}
-		// net/http reports the handshake to httptrace only for its own
-		// *tls.Conn, so the hooks are called here.
-		trace := httptrace.ContextClientTrace(ctx)
-		if trace != nil && trace.TLSHandshakeStart != nil {
-			trace.TLSHandshakeStart()
-		}
-		err = conn.HandshakeContext(ctx)
-		if trace != nil && trace.TLSHandshakeDone != nil {
-			trace.TLSHandshakeDone(tls.ConnectionState{}, err)
-		}
-		if err != nil {
+		if err := conn.HandshakeContext(ctx); err != nil {
 			raw.Close()
 			return nil, err
 		}

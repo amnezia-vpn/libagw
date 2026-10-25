@@ -53,7 +53,7 @@ func TestLastKnownAddressWhenDNSHangs(t *testing.T) {
 	if took := time.Since(started); took > time.Second {
 		t.Fatalf("post took %s", took)
 	}
-	if len(resp.Trace) != 2 || !strings.HasSuffix(resp.Trace[1], ", accepted; dns 300ms; last known address; ipv4; address 127.0.0.1") {
+	if len(resp.Trace) != 2 || !strings.HasSuffix(resp.Trace[1], ", accepted; dns 300ms; last known address") {
 		t.Fatalf("trace:\n%s", resp.Trace)
 	}
 }
@@ -70,7 +70,7 @@ func TestLastKnownAddressWhenDNSFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, traceOf(err))
 	}
-	if len(resp.Trace) != 2 || !strings.HasSuffix(resp.Trace[1], ", accepted; last known address; ipv4; address 127.0.0.1") {
+	if len(resp.Trace) != 2 || !strings.HasSuffix(resp.Trace[1], ", accepted; last known address") {
 		t.Fatalf("trace:\n%s", resp.Trace)
 	}
 }
@@ -86,7 +86,7 @@ func TestFreshDNSAnswerNeedsNoLastKnownNote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, traceOf(err))
 	}
-	if len(resp.Trace) != 2 || !strings.HasSuffix(resp.Trace[1], ", accepted; ipv4; address 127.0.0.1") {
+	if len(resp.Trace) != 2 || !strings.HasSuffix(resp.Trace[1], ", accepted") {
 		t.Fatalf("trace:\n%s", resp.Trace)
 	}
 }
